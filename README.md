@@ -147,19 +147,34 @@ User sources override built-ins with the same name — so you can replace
 Write your script following the protocol. Publish it as:
 
 1. **A standalone script** — users `/el:register` it
-2. **A Claude Code plugin** — with a skill that references `event-listen.sh`
-   and a post-install instruction to register the source
-3. **A PR to this repo** — to make it a built-in
+2. **A GitHub repo** — users clone and register, or fetch the raw URL
+3. **A PR to this repo** — to become a built-in
 
-Example community sources we'd love to see:
+For a complete example of a community event source, see
+**[claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll)** —
+polls a URL until the response matches a condition. Install it in one line:
 
-- `postgres-changes.sh` — LISTEN/NOTIFY on a Postgres channel
-- `slack-message.sh` — Watch a Slack channel for new messages
-- `docker-health.sh` — Wait for a container health check to pass/fail
-- `redis-subscribe.sh` — Subscribe to a Redis pub/sub channel
-- `http-poll.sh` — Poll a URL until the response matches a condition
-- `mqtt-subscribe.sh` — Subscribe to an MQTT topic
-- `s3-object.sh` — Wait for an S3 object to appear
+```bash
+/el:register ./claude-code-el-http-poll/http-poll.sh
+```
+
+### Community Sources
+
+| Source | What it does | Repo |
+|--------|-------------|------|
+| `http-poll` | Poll a URL until status/body matches | [claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll) |
+
+**Want to build one?** We'd love to see:
+
+- `postgres-changes` — LISTEN/NOTIFY on a Postgres channel
+- `slack-message` — Watch a Slack channel for new messages
+- `docker-health` — Wait for a container health check to pass/fail
+- `redis-subscribe` — Subscribe to a Redis pub/sub channel
+- `mqtt-subscribe` — Subscribe to an MQTT topic
+- `s3-object` — Wait for an S3 object to appear
+
+Name your repo `claude-code-el-<source-name>` and open a PR to add it to
+the table above.
 
 ## Requirements
 
