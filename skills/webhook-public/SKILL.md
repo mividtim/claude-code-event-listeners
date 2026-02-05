@@ -1,6 +1,6 @@
 ---
 description: Start a one-shot HTTP server exposed via ngrok tunnel. Use for receiving webhooks from external services like GitHub, Stripe, or any service that needs a public URL to POST to.
-argument-hint: [port=9999] [tunnel-name=claude-hook]
+argument-hint: [port=9999] [tunnel-name=claude-hook] [subdomain=]
 allowed-tools: Bash, Read
 ---
 
@@ -11,6 +11,13 @@ Bash(command="${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh webhook-public $ARGU
 ```
 
 This automatically creates an ngrok tunnel (reuses an existing ngrok agent if running, or starts one). The tunnel is cleaned up when the webhook fires or the task is stopped.
+
+**Args:**
+- `port` — local port for the HTTP server (default: 9999)
+- `tunnel-name` — ngrok tunnel name for management (default: claude-hook)
+- `subdomain` — ngrok vanity subdomain for a stable URL (Pro/Business plans).
+  e.g., `9999 my-hook my-app` → `https://my-app.ngrok.io` (same URL every time).
+  Omit for a random URL.
 
 **Two-phase output:**
 

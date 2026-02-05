@@ -48,7 +48,7 @@ claude --plugin-dir /path/to/claude-code-event-listeners
 |---------|-------------|
 | `/el:log-tail <file> [timeout] [max_lines]` | Tail a log file, return chunks of output |
 | `/el:webhook [port]` | One-shot HTTP server on localhost |
-| `/el:webhook-public [port] [name]` | One-shot HTTP server with automatic ngrok tunnel |
+| `/el:webhook-public [port] [name] [subdomain]` | One-shot HTTP server with ngrok tunnel (stable vanity URL with subdomain) |
 | `/el:ci-watch <run-id \| branch>` | Watch a GitHub Actions run until completion |
 | `/el:pr-checks <pr-number>` | Watch all PR checks until they resolve |
 | `/el:file-change <path>` | Watch a file for modifications |

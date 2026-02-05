@@ -8,7 +8,14 @@
 # If ngrok agent is already running (port 4040), creates a tunnel via API.
 # Otherwise, starts ngrok directly.
 #
-# Args: [port=9999] [tunnel-name=claude-hook]
+# Args: [port=9999] [tunnel-name=claude-hook] [subdomain=]
+#
+# The subdomain arg gives you a stable vanity URL on ngrok Pro/Business plans:
+#   webhook-public.sh 9999 my-hook my-app
+#   → https://my-app.ngrok.io (same URL every time)
+#
+# Without subdomain, you get a random URL that changes each invocation.
+#
 # Requires: ngrok (installed and authenticated)
 #
 # Event Source Protocol:
@@ -20,6 +27,7 @@ set -euo pipefail
 
 PORT="${1:-9999}"
 TUNNEL_NAME="${2:-claude-hook}"
+SUBDOMAIN="${3:-}"
 NGROK_API="${NGROK_API_URL:-http://127.0.0.1:4040}"
 NGROK_MANAGED=false
 
@@ -34,16 +42,26 @@ trap cleanup EXIT
 
 if curl -s --connect-timeout 2 "$NGROK_API/api/tunnels" > /dev/null 2>&1; then
   # ngrok agent already running — create tunnel via API
+  if [ -n "$SUBDOMAIN" ]; then
+    TUNNEL_JSON="{\"name\":\"$TUNNEL_NAME\",\"proto\":\"http\",\"addr\":\"$PORT\",\"subdomain\":\"$SUBDOMAIN\"}"
+  else
+    TUNNEL_JSON="{\"name\":\"$TUNNEL_NAME\",\"proto\":\"http\",\"addr\":\"$PORT\"}"
+  fi
   RESPONSE=$(curl -s -X POST "$NGROK_API/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"name\":\"$TUNNEL_NAME\",\"proto\":\"http\",\"addr\":\"$PORT\"}" 2>&1)
+    -d "$TUNNEL_JSON" 2>&1)
   if echo "$RESPONSE" | grep -q '"error_code"'; then
+    # Tunnel may already exist — try to fetch it
     RESPONSE=$(curl -s "$NGROK_API/api/tunnels/$TUNNEL_NAME" 2>/dev/null)
   fi
   PUBLIC_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('public_url',''))" 2>/dev/null)
 else
   # No ngrok running — start it for this tunnel
-  ngrok http "$PORT" --log=false > /dev/null 2>&1 &
+  if [ -n "$SUBDOMAIN" ]; then
+    ngrok http "$PORT" --subdomain="$SUBDOMAIN" --log=false > /dev/null 2>&1 &
+  else
+    ngrok http "$PORT" --log=false > /dev/null 2>&1 &
+  fi
   NGROK_PID=$!
   NGROK_MANAGED=true
   for i in $(seq 1 20); do
