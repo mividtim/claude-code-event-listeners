@@ -40,17 +40,27 @@ claude plugin install event-listeners
 claude --plugin-dir /path/to/claude-code-event-listeners
 ```
 
-## Built-in Event Sources
+## Slash Commands
 
-| Skill | What it does |
-|-------|-------------|
-| `/event-listeners:log-tail` | Tail a log file, return chunks of output |
-| `/event-listeners:webhook` | One-shot HTTP server on localhost |
-| `/event-listeners:webhook-public` | One-shot HTTP server with automatic ngrok tunnel |
-| `/event-listeners:ci-watch` | Watch a GitHub Actions run until completion |
-| `/event-listeners:pr-checks` | Watch all PR checks until they resolve |
-| `/event-listeners:file-change` | Watch a file for modifications |
-| `/event-listeners:listen` | Run any blocking command as an event source |
+### Event Sources
+
+| Command | What it does |
+|---------|-------------|
+| `/event-listeners:log-tail <file> [timeout] [max_lines]` | Tail a log file, return chunks of output |
+| `/event-listeners:webhook [port]` | One-shot HTTP server on localhost |
+| `/event-listeners:webhook-public [port] [name]` | One-shot HTTP server with automatic ngrok tunnel |
+| `/event-listeners:ci-watch <run-id \| branch>` | Watch a GitHub Actions run until completion |
+| `/event-listeners:pr-checks <pr-number>` | Watch all PR checks until they resolve |
+| `/event-listeners:file-change <path>` | Watch a file for modifications |
+| `/event-listeners:listen <command...>` | Run any blocking command as an event source |
+
+### Management
+
+| Command | What it does |
+|---------|-------------|
+| `/event-listeners:list` | Show all available sources (built-in + user) |
+| `/event-listeners:register <script>` | Register a custom event source |
+| `/event-listeners:unregister <name>` | Remove a user-installed source |
 
 ## Quick Start
 
@@ -125,19 +135,17 @@ echo "PORT_OPEN=$HOST:$PORT"
 
 ### Managing Sources
 
+Use the slash commands or the script directly:
+
 ```bash
-# List all available sources (built-in + user)
-event-listen.sh list
-
-# Register a new source
-event-listen.sh register ./my-custom-source.sh
-
-# Override a built-in source
-event-listen.sh register ./my-better-log-tail.sh  # if named log-tail.sh
-
-# Remove a user source
-event-listen.sh unregister my-custom-source
+/event-listeners:list                              # List all sources
+/event-listeners:register ./my-custom-source.sh    # Register a new source
+/event-listeners:unregister my-custom-source       # Remove a user source
 ```
+
+User sources override built-ins with the same name — so you can replace
+`log-tail` with your own implementation by registering a script named
+`log-tail.sh`.
 
 ### Creating Community Event Sources
 
