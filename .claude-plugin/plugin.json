@@ -1,0 +1,12 @@
+{
+  "name": "event-listeners",
+  "version": "0.1.0",
+  "description": "Event-driven background task listeners for Claude Code. Replace polling with real event notifications for logs, webhooks, CI, and file changes.",
+  "author": {
+    "name": "Tim Moran",
+    "url": "https://github.com/mividtim"
+  },
+  "repository": "https://github.com/mividtim/claude-code-event-listeners",
+  "license": "MIT",
+  "keywords": ["events", "webhooks", "background-tasks", "ci", "logs", "monitoring"]
+}
