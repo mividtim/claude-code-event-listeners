@@ -1,6 +1,6 @@
 {
   "name": "el",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Event-driven background task listeners for Claude Code. Replace polling with real event notifications for logs, webhooks, CI, and file changes.",
   "author": {
     "name": "Tim Moran",
