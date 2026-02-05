@@ -165,6 +165,7 @@ polls a URL until the response matches a condition. Install it in one line:
 | Source | What it does | Repo |
 |--------|-------------|------|
 | `http-poll` | Poll a URL until status/body matches | [claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll) |
+| `coderabbit` | Poll for new CodeRabbit reviews/comments on a PR | [claude-code-el-coderabbit](https://github.com/mividtim/claude-code-el-coderabbit) |
 
 **Want to build one?** We'd love to see:
 
