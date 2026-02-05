@@ -34,7 +34,7 @@ This isn't polling dressed up. The OS does the blocking. Claude only wakes up wh
 ```bash
 # From the marketplace
 claude plugin marketplace add mividtim/claude-code-event-listeners
-claude plugin install event-listeners
+claude plugin install el
 
 # Or load directly for a single session
 claude --plugin-dir /path/to/claude-code-event-listeners
@@ -46,29 +46,28 @@ claude --plugin-dir /path/to/claude-code-event-listeners
 
 | Command | What it does |
 |---------|-------------|
-| `/event-listeners:log-tail <file> [timeout] [max_lines]` | Tail a log file, return chunks of output |
-| `/event-listeners:webhook [port]` | One-shot HTTP server on localhost |
-| `/event-listeners:webhook-public [port] [name]` | One-shot HTTP server with automatic ngrok tunnel |
-| `/event-listeners:ci-watch <run-id \| branch>` | Watch a GitHub Actions run until completion |
-| `/event-listeners:pr-checks <pr-number>` | Watch all PR checks until they resolve |
-| `/event-listeners:file-change <path>` | Watch a file for modifications |
-| `/event-listeners:listen <command...>` | Run any blocking command as an event source |
+| `/el:log-tail <file> [timeout] [max_lines]` | Tail a log file, return chunks of output |
+| `/el:webhook [port]` | One-shot HTTP server on localhost |
+| `/el:webhook-public [port] [name]` | One-shot HTTP server with automatic ngrok tunnel |
+| `/el:ci-watch <run-id \| branch>` | Watch a GitHub Actions run until completion |
+| `/el:pr-checks <pr-number>` | Watch all PR checks until they resolve |
+| `/el:file-change <path>` | Watch a file for modifications |
+| `/el:listen <command...>` | Run any blocking command as an event source |
 
 ### Management
 
 | Command | What it does |
 |---------|-------------|
-| `/event-listeners:list` | Show all available sources (built-in + user) |
-| `/event-listeners:register <script>` | Register a custom event source |
-| `/event-listeners:unregister <name>` | Remove a user-installed source |
+| `/el:list` | Show all available sources (built-in + user) |
+| `/el:register <script>` | Register a custom event source |
+| `/el:unregister <name>` | Remove a user-installed source |
 
 ## Quick Start
 
 ### Tail a log file
 
 ```
-You: "tail the API server output"
-Claude: starts background task → event-listen.sh log-tail api.log 10 100
+You: /el:log-tail api.log
 ... time passes, log lines arrive ...
 <task-notification> → Claude reads the chunk, summarizes errors/warnings
 Claude: starts another listener for the next chunk
@@ -77,8 +76,7 @@ Claude: starts another listener for the next chunk
 ### Wait for CI
 
 ```
-You: "push and watch CI"
-Claude: git push, then background task → event-listen.sh ci-watch my-branch
+You: /el:ci-watch my-branch
 ... minutes pass, Claude does nothing ...
 <task-notification> → CI passed! (or failed → Claude investigates)
 ```
@@ -86,9 +84,8 @@ Claude: git push, then background task → event-listen.sh ci-watch my-branch
 ### Receive a webhook
 
 ```
-You: "set up a webhook for GitHub review events"
-Claude: background task → event-listen.sh webhook-public 9999 gh-review
-         immediately reads URL: WEBHOOK_URL=https://xxxx.ngrok.app
+You: /el:webhook-public 9999 gh-review
+Claude: immediately reads URL: WEBHOOK_URL=https://xxxx.ngrok.app
          registers URL with GitHub
 ... waits ...
 <task-notification> → GitHub POSTed a review event → Claude reads and reacts
@@ -135,12 +132,10 @@ echo "PORT_OPEN=$HOST:$PORT"
 
 ### Managing Sources
 
-Use the slash commands or the script directly:
-
 ```bash
-/event-listeners:list                              # List all sources
-/event-listeners:register ./my-custom-source.sh    # Register a new source
-/event-listeners:unregister my-custom-source       # Remove a user source
+/el:list                              # List all sources
+/el:register ./my-custom-source.sh    # Register a new source
+/el:unregister my-custom-source       # Remove a user source
 ```
 
 User sources override built-ins with the same name — so you can replace
@@ -151,7 +146,7 @@ User sources override built-ins with the same name — so you can replace
 
 Write your script following the protocol. Publish it as:
 
-1. **A standalone script** — users `event-listen.sh register` it
+1. **A standalone script** — users `/el:register` it
 2. **A Claude Code plugin** — with a skill that references `event-listen.sh`
    and a post-install instruction to register the source
 3. **A PR to this repo** — to make it a built-in
