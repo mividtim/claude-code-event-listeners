@@ -2,6 +2,8 @@
 
 Event-driven background task listeners for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Replace polling with real event notifications.
 
+![Demo](marketing/demo.gif)
+
 ## The Problem
 
 Claude Code uses a request-response model. When waiting for CI, log output, webhooks, or file changes, the typical approach is **polling**: sleep, check, repeat. This burns turns, wastes tokens, and feels janky.
