@@ -20,7 +20,7 @@ This isn't polling dressed up. The OS does the blocking. Claude only wakes up wh
 ```
                     ┌──────────────────────────┐
                     │  Background Task          │
-                    │  (event-listen.sh)        │
+                    │  (event source script)    │
                     │                           │
   Event source ───► │  Blocks until event ───►  │ ──► Task completes
   (log, webhook,    │  Outputs event data       │      ↓
@@ -32,17 +32,15 @@ This isn't polling dressed up. The OS does the blocking. Claude only wakes up wh
 ## Install
 
 ```bash
-# Add the marketplace (one-time)
+# From the marketplace
 claude plugin marketplace add mividtim/claude-code-event-listeners
-
-# Install
 claude plugin install event-listeners
 
 # Or load directly for a single session
 claude --plugin-dir /path/to/claude-code-event-listeners
 ```
 
-## Event Sources
+## Built-in Event Sources
 
 | Skill | What it does |
 |-------|-------------|
@@ -81,54 +79,97 @@ Claude: git push, then background task → event-listen.sh ci-watch my-branch
 You: "set up a webhook for GitHub review events"
 Claude: background task → event-listen.sh webhook-public 9999 gh-review
          immediately reads URL: WEBHOOK_URL=https://xxxx.ngrok.app
-         registers URL with GitHub as a webhook target
+         registers URL with GitHub
 ... waits ...
 <task-notification> → GitHub POSTed a review event → Claude reads and reacts
 ```
 
-### Multiple concurrent sources
+## Architecture: Pluggable Event Sources
 
-Claude can run several background listeners at once. Whichever fires first gets handled:
+The plugin is designed as a **platform**, not a monolith. Every event source —
+including the built-in ones — is a standalone script in `sources.d/`.
 
 ```
-event-listen.sh ci-watch my-branch          (background)
-event-listen.sh log-tail api.log 30 200     (background)
-event-listen.sh file-change config.json     (background)
+event-listen.sh (dispatcher)
+    │
+    ├── looks up source type in:
+    │   1. ~/.config/claude-event-listeners/sources.d/  (user, wins)
+    │   2. <plugin>/sources.d/                          (built-in)
+    │
+    └── exec's the matching script with remaining args
 ```
 
-## How It Works
+Built-in sources are not special. They can be overridden, replaced, or used
+as templates for new ones.
 
-### log-tail
+### The Event Source Protocol
 
-Uses a named FIFO with `tail -f` and `read -t` for macOS compatibility. The per-line timeout means: "give me lines as fast as they come, but if nothing new arrives for N seconds, return what you have." Explicitly kills `tail` on exit (macOS `tail -f` ignores SIGPIPE).
+An event source is any executable script that:
 
-### webhook / webhook-public
+1. **Receives args** as `$@`
+2. **Blocks** until an event occurs
+3. **Outputs event data** to stdout
+4. **Exits cleanly**
 
-Python one-shot HTTP server. Accepts a single request, prints it as JSON, exits. The `webhook-public` variant auto-creates an ngrok tunnel (reuses existing ngrok agent if running, or starts one). Tunnel is cleaned up on exit via `trap`.
+That's the entire contract. Here's a minimal example:
 
-### ci-watch / pr-checks
+```bash
+#!/bin/bash
+# sources.d/port-ready.sh — Wait for a TCP port to open.
+# Args: <host> <port>
+set -euo pipefail
+HOST="${1:?}" PORT="${2:?}"
+while ! nc -z "$HOST" "$PORT" 2>/dev/null; do sleep 1; done
+echo "PORT_OPEN=$HOST:$PORT"
+```
 
-Wraps `gh run watch` and `gh pr checks --watch` — these are already blocking commands that exit when done. The script adds branch-name lookup and error handling.
+### Managing Sources
 
-### file-change
+```bash
+# List all available sources (built-in + user)
+event-listen.sh list
 
-Uses `fswatch` (macOS), `inotifywait` (Linux), or stat-polling fallback. Fires once per modification.
+# Register a new source
+event-listen.sh register ./my-custom-source.sh
+
+# Override a built-in source
+event-listen.sh register ./my-better-log-tail.sh  # if named log-tail.sh
+
+# Remove a user source
+event-listen.sh unregister my-custom-source
+```
+
+### Creating Community Event Sources
+
+Write your script following the protocol. Publish it as:
+
+1. **A standalone script** — users `event-listen.sh register` it
+2. **A Claude Code plugin** — with a skill that references `event-listen.sh`
+   and a post-install instruction to register the source
+3. **A PR to this repo** — to make it a built-in
+
+Example community sources we'd love to see:
+
+- `postgres-changes.sh` — LISTEN/NOTIFY on a Postgres channel
+- `slack-message.sh` — Watch a Slack channel for new messages
+- `docker-health.sh` — Wait for a container health check to pass/fail
+- `redis-subscribe.sh` — Subscribe to a Redis pub/sub channel
+- `http-poll.sh` — Poll a URL until the response matches a condition
+- `mqtt-subscribe.sh` — Subscribe to an MQTT topic
+- `s3-object.sh` — Wait for an S3 object to appear
 
 ## Requirements
 
 - **bash** (3.2+ for macOS, 4.0+ for Linux)
-- **python3** (for webhook servers)
+- **python3** (for webhook sources)
 - **gh** CLI (for ci-watch and pr-checks) — [install](https://cli.github.com/)
 - **ngrok** (for webhook-public only) — [install](https://ngrok.com/download)
 
 ## Contributing
 
-PRs welcome. The best contributions would be new event source types:
-- Slack message listener
-- Docker container health/exit watcher
-- Database change listener
-- RSS/Atom feed watcher
-- MQTT subscriber
+The best way to contribute is to write new event sources. See the
+[Event Source Protocol](#the-event-source-protocol) above and the scripts in
+`sources.d/` for examples.
 
 ## License
 
