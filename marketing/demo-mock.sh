@@ -12,13 +12,12 @@ B='\033[1m'
 R='\033[0m'
 
 printf "\033c\033[?25l"
-sleep 0.6
 
-# --- Act 1: Hook ---
+# --- Act 1: Hook (visible from frame 1) ---
 printf "\n\n"
 printf "  ${B}${WHITE}Stop polling. Start listening.${R}\n\n"
 printf "  ${DIM}A Claude Code plugin.${R}\n"
-sleep 2.4
+sleep 3.0
 
 printf "\033c"
 sleep 0.3

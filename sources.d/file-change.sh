@@ -75,19 +75,29 @@ if command -v fswatch &>/dev/null; then
     # Single direct file — original fast path.
     exec fswatch -1 "${DIRECT_FILES[0]}"
   fi
+  # Get absolute, resolved watch root for anchoring patterns.
+  ABS_ROOT="$(cd "$WATCH_ROOT" && pwd -P)"
+  ESCAPED_ROOT="$(echo "$ABS_ROOT" | sed 's/\./\\./g')"
   # -E enables extended regex for patterns like (.*/)?
   FSWATCH_ARGS=(-1 -E)
   for arg in "$@"; do
     if is_glob "$arg"; then
-      FSWATCH_ARGS+=(--include "$(glob_to_regex "$arg")$")
+      # Anchor glob pattern to the watch root to prevent matching in subdirs.
+      # e.g., */CLAUDE.md becomes ^<ROOT>/[^/]*/CLAUDE\.md$
+      FSWATCH_ARGS+=(--include "^${ESCAPED_ROOT}/$(glob_to_regex "$arg")$")
     else
-      # Resolve to absolute path for precise matching.
-      if [ -e "$arg" ]; then
-        abs="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
+      # Resolve to absolute, real path for precise matching.
+      # Use pwd -P to resolve symlinks (fswatch reports real paths).
+      # Check relative to WATCH_ROOT, not cwd.
+      if [ -e "$WATCH_ROOT/$arg" ]; then
+        abs="$(cd "$WATCH_ROOT" && cd "$(dirname "$arg")" && pwd -P)/$(basename "$arg")"
+      elif [ -e "$arg" ]; then
+        # Absolute path or path relative to cwd
+        abs="$(cd "$(dirname "$arg")" && pwd -P)/$(basename "$arg")"
       else
-        abs="$WATCH_ROOT/$arg"
+        abs="$ABS_ROOT/$arg"
       fi
-      FSWATCH_ARGS+=(--include "$(echo "$abs" | sed 's/\./\\./g')$")
+      FSWATCH_ARGS+=(--include "^$(echo "$abs" | sed 's/\./\\./g')$")
     fi
   done
   # Default-deny: only report events matching an include filter.
@@ -100,17 +110,21 @@ elif command -v inotifywait &>/dev/null; then
     inotifywait -e modify -q "${DIRECT_FILES[0]}" 2>/dev/null
     exit $?
   fi
+  ABS_ROOT="$(cd "$WATCH_ROOT" && pwd -P)"
+  ESCAPED_ROOT="$(echo "$ABS_ROOT" | sed 's/\./\\./g')"
   REGEX_PARTS=()
   for arg in "$@"; do
     if is_glob "$arg"; then
-      REGEX_PARTS+=("$(glob_to_regex "$arg")$")
+      REGEX_PARTS+=("^${ESCAPED_ROOT}/$(glob_to_regex "$arg")$")
     else
-      if [ -e "$arg" ]; then
+      if [ -e "$WATCH_ROOT/$arg" ]; then
+        abs="$(cd "$WATCH_ROOT" && cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
+      elif [ -e "$arg" ]; then
         abs="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
       else
-        abs="$WATCH_ROOT/$arg"
+        abs="$ABS_ROOT/$arg"
       fi
-      REGEX_PARTS+=("$(echo "$abs" | sed 's/\./\\./g')$")
+      REGEX_PARTS+=("^$(echo "$abs" | sed 's/\./\\./g')$")
     fi
   done
   COMBINED=$(printf '%s|' "${REGEX_PARTS[@]}")
