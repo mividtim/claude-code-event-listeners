@@ -53,7 +53,8 @@ claude --plugin-dir /path/to/claude-code-event-listeners
 | `/el:webhook-public [port] [name] [subdomain]` | One-shot HTTP server with ngrok tunnel (stable vanity URL with subdomain) |
 | `/el:ci-watch <run-id \| branch>` | Watch a GitHub Actions run until completion |
 | `/el:pr-checks <pr-number>` | Watch all PR checks until they resolve |
-| `/el:file-change <path>` | Watch a file for modifications |
+| `/el:file-change [--root dir] <path-or-glob>...` | Watch file(s) for modifications (supports globs) |
+| `/el:context-sync [project-root]` | Watch CLAUDE.md and .claude/ docs for cross-session sync |
 | `/el:listen <command...>` | Run any blocking command as an event source |
 
 ### Management
