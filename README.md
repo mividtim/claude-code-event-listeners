@@ -177,6 +177,7 @@ polls a URL until the response matches a condition. Install it in one line:
 | `http-poll` | Poll a URL until status/body matches | [claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll) |
 | `coderabbit` | Poll for new CodeRabbit reviews/comments on a PR | [claude-code-el-coderabbit](https://github.com/mividtim/claude-code-el-coderabbit) |
 | `slack` | Listen for Slack messages via webhook | [claude-code-el-slack](https://github.com/mividtim/claude-code-el-slack) |
+| `sendgrid` | Receive inbound emails via SendGrid Inbound Parse | [claude-code-el-sendgrid](https://github.com/mividtim/claude-code-el-sendgrid) |
 
 **Want to build one?** We'd love to see:
 
