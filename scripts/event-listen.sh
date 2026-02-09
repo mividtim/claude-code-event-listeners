@@ -1,12 +1,14 @@
 #!/bin/bash
 # event-listen.sh — Generic event listener dispatcher for Claude Code.
 #
-# Looks up event source scripts in:
-#   1. User sources:   ~/.config/claude-event-listeners/sources.d/<type>.sh
-#   2. Plugin sources:  <plugin-root>/sources.d/<type>.sh
+# Looks up event source scripts in (priority order):
+#   1. User sources:    ~/.config/claude-event-listeners/sources.d/<type>.sh
+#   2. Built-in sources: <plugin-root>/sources.d/<type>.sh
+#   3. Community plugins: ~/.claude/plugins/cache/*/*/sources.d/<type>.sh
 #
-# User sources take priority, so you can override any built-in source.
-# To add a new source, drop an executable script in either directory.
+# User sources take priority, so you can override any built-in or community source.
+# Community plugins are auto-discovered — install a plugin with sources.d/ and
+# its sources become available immediately. No registration needed.
 #
 # Event Source Protocol:
 #   - Receive args as $@
@@ -22,20 +24,41 @@ set -euo pipefail
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 USER_SOURCES="${CLAUDE_EVENT_LISTENERS_DIR:-$HOME/.config/claude-event-listeners}/sources.d"
 PLUGIN_SOURCES="$PLUGIN_ROOT/sources.d"
+PLUGIN_CACHE="${CLAUDE_PLUGINS_CACHE:-$HOME/.claude/plugins/cache}"
 
-# Find a source script by name. User dir wins over plugin dir.
+# Find a source script by name. User > built-in > community plugin.
 find_source() {
   local name="$1"
   if [ -x "$USER_SOURCES/$name.sh" ]; then
     echo "$USER_SOURCES/$name.sh"
   elif [ -x "$PLUGIN_SOURCES/$name.sh" ]; then
     echo "$PLUGIN_SOURCES/$name.sh"
+  elif [ -d "$PLUGIN_CACHE" ]; then
+    # Scan installed community plugins for sources.d/
+    for f in "$PLUGIN_CACHE"/*/*/sources.d/"$name.sh"; do
+      [ -x "$f" ] || continue
+      # Skip our own plugin directory
+      local plugin_dir
+      plugin_dir="$(cd "$(dirname "$f")/.." && pwd)"
+      [ "$plugin_dir" = "$PLUGIN_ROOT" ] && continue
+      echo "$f"
+      return
+    done
   fi
+}
+
+# Check if a name is in the seen array.
+_is_seen() {
+  local name="$1"; shift
+  for s in "$@"; do [ "$s" = "$name" ] && return 0; done
+  return 1
 }
 
 # List all available sources (deduplicated, user overrides noted).
 list_sources() {
   local seen=()
+
+  # 1. User-registered sources (highest priority)
   if [ -d "$USER_SOURCES" ]; then
     for f in "$USER_SOURCES"/*.sh; do
       [ -x "$f" ] || continue
@@ -44,20 +67,34 @@ list_sources() {
       echo "  $name (user)"
     done
   fi
+
+  # 2. Built-in sources
   for f in "$PLUGIN_SOURCES"/*.sh; do
     [ -x "$f" ] || continue
     local name=$(basename "$f" .sh)
-    # Skip if user already provides this source
-    local overridden=false
-    for s in "${seen[@]+"${seen[@]}"}"; do
-      [ "$s" = "$name" ] && overridden=true && break
-    done
-    if [ "$overridden" = "true" ]; then
+    if _is_seen "$name" "${seen[@]+"${seen[@]}"}"; then
       echo "  $name (built-in, overridden by user)"
     else
+      seen+=("$name")
       echo "  $name (built-in)"
     fi
   done
+
+  # 3. Community plugin sources (auto-discovered)
+  if [ -d "$PLUGIN_CACHE" ]; then
+    for f in "$PLUGIN_CACHE"/*/*/sources.d/*.sh; do
+      [ -x "$f" ] || continue
+      local plugin_dir
+      plugin_dir="$(cd "$(dirname "$f")/.." && pwd)"
+      [ "$plugin_dir" = "$PLUGIN_ROOT" ] && continue
+      local name=$(basename "$f" .sh)
+      if _is_seen "$name" "${seen[@]+"${seen[@]}"}"; then
+        continue  # Already provided by user or built-in
+      fi
+      seen+=("$name")
+      echo "  $name (community plugin)"
+    done
+  fi
 }
 
 usage() {
@@ -69,6 +106,7 @@ Usage: event-listen.sh <source-type> [args...]
 Dispatcher for event source scripts. Looks up <source-type>.sh in:
   1. $USER_SOURCES/ (user, takes priority)
   2. $PLUGIN_SOURCES/ (built-in)
+  3. Installed community plugins with sources.d/
 
 Available sources:
 $(list_sources)

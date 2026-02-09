@@ -114,6 +114,7 @@ event-listen.sh (dispatcher)
     ├── looks up source type in:
     │   1. ~/.config/claude-event-listeners/sources.d/  (user, wins)
     │   2. <plugin>/sources.d/                          (built-in)
+    │   3. ~/.claude/plugins/cache/*/*/sources.d/        (community plugins)
     │
     └── exec's the matching script with remaining args
 ```
@@ -156,18 +157,25 @@ User sources override built-ins with the same name — so you can replace
 
 ### Creating Community Event Sources
 
-Write your script following the protocol. Publish it as:
+Write your script following the protocol. Publish it as a **Claude Code plugin**:
 
-1. **A standalone script** — users `/el:register` it
-2. **A GitHub repo** — users clone and register, or fetch the raw URL
-3. **A PR to this repo** — to become a built-in
-
-For a complete example of a community event source, see
-**[claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll)** —
-polls a URL until the response matches a condition. Install it in one line:
+1. Create a repo named `claude-code-el-<source-name>`
+2. Put your source script(s) in `sources.d/`
+3. Add `.claude-plugin/plugin.json` declaring `el` as a dependency
+4. Users install via the marketplace — el auto-discovers the source
 
 ```bash
-/el:register ./claude-code-el-http-poll/http-poll.sh
+# Users install your source as a plugin:
+claude plugin marketplace add yourname/claude-code-el-my-source
+claude plugin install el-my-source
+# That's it — el discovers sources.d/ automatically
+```
+
+Sources can also be registered manually without the marketplace:
+
+```bash
+git clone https://github.com/you/claude-code-el-my-source.git
+/el:register ./claude-code-el-my-source/sources.d/my-source.sh
 ```
 
 ### Community Sources
