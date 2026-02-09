@@ -46,3 +46,8 @@ tasks. Handle whichever fires first.
 - Prefer `/el:ci-watch` over `gh run watch` — it integrates with the
   background task notification system.
 - After handling an event, re-subscribe if you need continuous monitoring.
+- **Do not add `&` to commands when using `run_in_background=true`.** The
+  `run_in_background` parameter already handles backgrounding. Adding `&`
+  double-backgrounds the command: the shell exits immediately, the task system
+  reports "completed", and the listener continues as an orphan with no
+  notification mechanism.
