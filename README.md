@@ -55,6 +55,7 @@ claude --plugin-dir /path/to/claude-code-event-listeners
 | `/el:pr-checks <pr-number>` | Watch all PR checks until they resolve |
 | `/el:file-change [--root dir] <path-or-glob>...` | Watch file(s) for modifications (supports globs) |
 | `/el:context-sync [project-root]` | Watch CLAUDE.md and .claude/ docs for cross-session sync |
+| `/el:poll <interval> <command>` | Poll a command, fire when output changes |
 | `/el:listen <command...>` | Run any blocking command as an event source |
 
 ### Management
@@ -82,6 +83,14 @@ Claude: starts another listener for the next chunk
 You: /el:ci-watch my-branch
 ... minutes pass, Claude does nothing ...
 <task-notification> → CI passed! (or failed → Claude investigates)
+```
+
+### Monitor an API
+
+```
+You: /el:poll 60 "curl -s https://api.example.com/status | jq .count"
+... polls every 60s, Claude does nothing ...
+<task-notification> → count changed! Claude reads old/new value and reacts
 ```
 
 ### Receive a webhook
@@ -167,11 +176,11 @@ polls a URL until the response matches a condition. Install it in one line:
 |--------|-------------|------|
 | `http-poll` | Poll a URL until status/body matches | [claude-code-el-http-poll](https://github.com/mividtim/claude-code-el-http-poll) |
 | `coderabbit` | Poll for new CodeRabbit reviews/comments on a PR | [claude-code-el-coderabbit](https://github.com/mividtim/claude-code-el-coderabbit) |
+| `slack` | Listen for Slack messages via webhook | [claude-code-el-slack](https://github.com/mividtim/claude-code-el-slack) |
 
 **Want to build one?** We'd love to see:
 
 - `postgres-changes` — LISTEN/NOTIFY on a Postgres channel
-- `slack-message` — Watch a Slack channel for new messages
 - `docker-health` — Wait for a container health check to pass/fail
 - `redis-subscribe` — Subscribe to a Redis pub/sub channel
 - `mqtt-subscribe` — Subscribe to an MQTT topic
