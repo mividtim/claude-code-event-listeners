@@ -103,10 +103,10 @@ case "$SOURCE_TYPE" in
       exit 1
     fi
     mkdir -p "$USER_SOURCES"
+    SCRIPT="$(cd "$(dirname "$SCRIPT")" && pwd)/$(basename "$SCRIPT")"
     NAME=$(basename "$SCRIPT" .sh)
-    cp "$SCRIPT" "$USER_SOURCES/$NAME.sh"
-    chmod +x "$USER_SOURCES/$NAME.sh"
-    echo "Registered source '$NAME' → $USER_SOURCES/$NAME.sh"
+    ln -sf "$SCRIPT" "$USER_SOURCES/$NAME.sh"
+    echo "Registered source '$NAME' → $USER_SOURCES/$NAME.sh (symlink)"
     ;;
   unregister)
     NAME="${1:?Usage: event-listen.sh unregister <source-name>}"
