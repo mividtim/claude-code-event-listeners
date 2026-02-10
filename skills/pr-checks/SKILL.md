@@ -1,6 +1,6 @@
 ---
 description: Watch all checks on a pull request until they complete. Use when waiting for CI checks, code review bots, or other PR status checks.
-argument-hint: <pr-number>
+argument-hint: <pr-number | url | owner/repo#number>
 allowed-tools: Bash, Read
 ---
 
