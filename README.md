@@ -56,6 +56,7 @@ claude --plugin-dir /path/to/claude-code-event-listeners
 | `/el:file-change [--root dir] <path-or-glob>...` | Watch file(s) for modifications (supports globs) |
 | `/el:context-sync [project-root]` | Watch CLAUDE.md and .claude/ docs for cross-session sync |
 | `/el:poll <interval> <command>` | Poll a command, fire when output changes |
+| `/el:heartbeat <interval> <cmd1> -- <cmd2> [...]` | Monitor multiple commands, fire when any output changes |
 | `/el:listen <command...>` | Run any blocking command as an event source |
 
 ### Management
@@ -91,6 +92,15 @@ You: /el:ci-watch my-branch
 You: /el:poll 60 "curl -s https://api.example.com/status | jq .count"
 ... polls every 60s, Claude does nothing ...
 <task-notification> → count changed! Claude reads old/new value and reacts
+```
+
+### Monitor multiple things at once
+
+```
+You: /el:heartbeat 90 "scripts/moltbook-counts.sh" -- "curl -s https://api.example.com/status"
+... polls both commands every 90s, Claude does nothing ...
+<task-notification> → JSON report shows which commands changed, with old/new values
+Claude: reads the report, reacts to what changed, starts another heartbeat
 ```
 
 ### Receive a webhook
