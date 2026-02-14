@@ -18,6 +18,11 @@ import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -441,8 +446,7 @@ def main():
     conn = _get_db()
     conn.close()
 
-    server = HTTPServer(('0.0.0.0', PORT), SidecarHandler)
-    server.daemon_threads = True
+    server = ThreadingHTTPServer(('0.0.0.0', PORT), SidecarHandler)
 
     sys.stderr.write(f"[sidecar] Listening on 0.0.0.0:{PORT}\n")
     sys.stderr.write(f"[sidecar] DB: {DB_PATH}\n")
