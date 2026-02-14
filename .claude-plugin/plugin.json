@@ -1,6 +1,6 @@
 {
   "name": "el",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Event-driven background task listeners for Claude Code. Replace polling with real event notifications for logs, webhooks, CI, file changes, and cross-session context sync. Includes el-sidecar for shared event buffering.",
   "author": {
     "name": "Tim Garthwaite",

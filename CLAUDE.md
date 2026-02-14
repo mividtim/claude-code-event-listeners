@@ -51,3 +51,30 @@ tasks. Handle whichever fires first.
   double-backgrounds the command: the shell exits immediately, the task system
   reports "completed", and the listener continues as an orphan with no
   notification mechanism.
+
+## Sidecar Architecture
+
+The `el-sidecar.py` uses `ThreadingHTTPServer` (not Python's default single-threaded `HTTPServer`). This is critical: long-poll requests like `GET /events?wait=true` block for up to 30 seconds. Without threading, a pending drain blocks all webhook ingestion — Slack retries with exponential backoff, causing 6+ minute event delays.
+
+### Single Drain Pattern
+
+Use exactly ONE consumer draining events from the sidecar. Multiple consumers compete for the `picked_up` flag, causing missed events. The correct architecture:
+
+1. One `el:listen` background task running a drain script
+2. The drain script long-polls `GET /events?wait=true`
+3. On receiving events, output them to stdout and exit
+4. The agent reads the output, routes each event by `source` field, re-invokes the listener
+5. Empty responses (timeout, `[]`) should be retried internally — only exit on real events
+
+### Drain Script Example
+
+```bash
+#!/usr/bin/env bash
+SIDECAR_URL="${SIDECAR_URL:-http://localhost:9999}"
+while true; do
+  RESPONSE=$(curl -sf "${SIDECAR_URL}/events?wait=true" 2>/dev/null) || { sleep 5; continue; }
+  if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then continue; fi
+  echo "$RESPONSE"
+  exit 0
+done
+```
