@@ -994,16 +994,48 @@ def _discover_plugins():
         sys.stderr.write(f"[sidecar] Failed to read plugin manifest: {e}\n")
         return []
 
-    plugins = []
-    for entry in manifest:
-        install_path = entry.get('install_path') or entry.get('path', '')
-        if not install_path:
-            continue
+    # v2 format: {"version": 2, "plugins": {"id@market": [{"installPath": "...", "scope": "project", ...}]}}
+    # v1 format: [{"install_path": "...", "name": "..."}]
+    raw_plugins = manifest
+    if isinstance(manifest, dict):
+        raw_plugins = manifest.get('plugins', {})
 
-        plugin_py = os.path.join(install_path, 'sidecar', 'plugin.py')
-        if os.path.isfile(plugin_py):
-            name = entry.get('name') or os.path.basename(install_path)
-            plugins.append((name, plugin_py))
+    plugins = []
+    project_root = _project_root
+
+    if isinstance(raw_plugins, dict):
+        # v2 format — dict of plugin_id -> list of install entries
+        for plugin_id, installs in raw_plugins.items():
+            if not isinstance(installs, list):
+                continue
+            for entry in installs:
+                if not isinstance(entry, dict):
+                    continue
+                # Filter: only load plugins scoped to this project or user-scoped
+                scope = entry.get('scope', '')
+                project_path = entry.get('projectPath', '')
+                if scope == 'project' and project_path and project_root:
+                    if os.path.realpath(project_path) != os.path.realpath(project_root):
+                        continue
+                install_path = entry.get('installPath') or entry.get('install_path', '')
+                if not install_path:
+                    continue
+                plugin_py = os.path.join(install_path, 'sidecar', 'plugin.py')
+                if os.path.isfile(plugin_py):
+                    name = plugin_id.split('@')[0] if '@' in plugin_id else os.path.basename(install_path)
+                    plugins.append((name, plugin_py))
+    elif isinstance(raw_plugins, list):
+        # v1 format — flat list
+        for entry in raw_plugins:
+            if not isinstance(entry, dict):
+                continue
+            install_path = entry.get('install_path') or entry.get('path', '')
+            if not install_path:
+                continue
+            plugin_py = os.path.join(install_path, 'sidecar', 'plugin.py')
+            if os.path.isfile(plugin_py):
+                name = entry.get('name') or os.path.basename(install_path)
+                plugins.append((name, plugin_py))
 
     return plugins
 
