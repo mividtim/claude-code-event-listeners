@@ -4,14 +4,18 @@ argument-hint: <run-id | branch-name>
 allowed-tools: Bash, Read
 ---
 
-Watch a GitHub Actions run as a background task:
+Register a CI source with the sidecar that fires when the run completes.
+
+Parse `$ARGUMENTS` for a run ID (numeric) or branch name.
+
+Generate a source name (e.g., `ci-main`, `ci-12345`).
 
 ```
-Bash(command="${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh ci-watch $ARGUMENTS", run_in_background=true)
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-register.py' ci 'SOURCE_NAME' $ARGUMENTS")
 ```
 
-Pass either a numeric run ID or a branch name. If a branch name is given, it watches the most recent run on that branch.
+Events arrive through the sidecar drain — look for `source: "runtime:SOURCE_NAME"` with `type: "ci_completed"`. The event `text` contains pass/fail details. Check `metadata.exit_code` for the result.
 
-When the `<task-notification>` arrives, the CI run has completed. Read the output to see pass/fail status and details. If it failed, investigate with `gh run view <id> --log-failed`.
+If the run failed, investigate with `gh run view <id> --log-failed`.
 
 **Requirements:** `gh` CLI must be installed and authenticated.

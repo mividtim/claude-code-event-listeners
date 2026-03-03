@@ -4,25 +4,27 @@ argument-hint: [--root <dir>] <path-or-glob> [path-or-glob...]
 allowed-tools: Bash, Read
 ---
 
-Watch file(s) for changes as a background task. Quote glob patterns in single
-quotes to prevent shell expansion:
+Register a watch source with the sidecar that fires when matching files change.
+
+Parse `$ARGUMENTS` for optional `--root <dir>` and the file paths/glob patterns.
+
+Generate a source name (e.g., `watch-claude-md`, `watch-docs`).
 
 ```
-Bash(command="${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh file-change $ARGUMENTS", run_in_background=true)
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-register.py' watch 'SOURCE_NAME' $ARGUMENTS")
 ```
 
-Supports direct file paths, multiple files, and glob patterns:
-- `CLAUDE.md` — one specific file
-- `'**/CLAUDE.md'` — any CLAUDE.md in the tree
-- `'.claude/docs/*.md'` — all .md files in .claude/docs/
-- `'**/CLAUDE.md' '.claude/commands/*.md' '.claude/docs/*.md'` — all three
+The `source-register.py watch` subcommand accepts the same `--root` flag and path arguments as the old `file-change.sh`.
 
-Use `--root <dir>` to watch from a parent directory (e.g., the main worktree
-root so changes from other worktrees are visible):
-- `--root /path/to/project '**/CLAUDE.md'`
+Events arrive through the sidecar drain — look for `source: "runtime:SOURCE_NAME"` with `type: "file_changed"`. The event `text` contains the changed file path.
 
-Glob patterns require `fswatch` (macOS: `brew install fswatch`) or `inotifywait`
-(Linux). Direct file paths work everywhere via stat-polling fallback.
+The watch re-arms automatically after each event — no need to restart. To stop watching:
+```
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-remove.py' 'SOURCE_NAME'")
+```
 
-When the `<task-notification>` arrives, a matching file was modified. Read the
-changed file to see what's new, then start a new listener to keep watching.
+Supports:
+- Direct file paths: `CLAUDE.md`
+- Glob patterns (require fswatch/inotifywait): `'**/CLAUDE.md'`, `'.claude/docs/*.md'`
+- Multiple paths: `'**/CLAUDE.md' '.claude/commands/*.md'`
+- `--root <dir>` to watch from a parent directory (e.g., main worktree root)

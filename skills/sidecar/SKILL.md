@@ -70,6 +70,14 @@ echo \"Sidecar running on port $PORT (PID: $PID)\"
 curl -sf http://localhost:$PORT/health | python3 -m json.tool")
 ```
 
+### `sources`
+
+List active runtime sources registered with the sidecar.
+
+```
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-list.py'")
+```
+
 ## Notes
 
 - The sidecar auto-discovers plugins from `~/.claude/plugins/installed_plugins.json`
@@ -77,4 +85,5 @@ curl -sf http://localhost:$PORT/health | python3 -m json.tool")
 - Port 0 (default) lets the OS auto-assign — actual port is in `.claude/sidecar.json`
 - DB is per-project: `/tmp/el-sidecar-{hash}.db`
 - Use `wait=true` on `/events` for blocking drain (never returns empty)
+- Runtime sources are registered via `POST /source` and arrive through the same drain
 - **Do not add `&` to commands when using `run_in_background=true`.**

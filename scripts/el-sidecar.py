@@ -1,6 +1,6 @@
 """el-sidecar — Plugin-aware event hub for Claude Code agents.
 
-Version: 0.9.0
+Version: 1.0.0
 
 Source-agnostic event hub with self-registering plugin system. Plugins declare
 themselves via sidecar/plugin.py with a register(api) function. The sidecar
@@ -16,6 +16,8 @@ Features:
     - Plugin-registered webhook routes (POST /slack, etc.)
     - Plugin-registered background pollers
     - Runtime watch API for PR-scoped plugins (POST /watch, GET /watches)
+    - Runtime Source API (POST /source, DELETE /source, GET /sources)
+    - Dynamic event sources: poll, heartbeat, command, watch, tail, ci, webhook
     - Auto-port (port 0) with metadata written to .claude/sidecar.json
     - Per-project DB isolation (/tmp/el-sidecar-{hash}.db)
     - Plugin discovery from ~/.claude/plugins/installed_plugins.json
@@ -28,14 +30,18 @@ Env vars:
     SIDECAR_PROJECT_ROOT   — Project root for metadata (default: cwd)
 """
 
-__version__ = '0.9.0'
+__version__ = '1.0.0'
 
 import hashlib
+import heapq
 import importlib.util
 import json
 import os
+import select
+import shutil
 import signal
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -47,6 +53,7 @@ from urllib.parse import unquote
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +602,678 @@ def _notify_ledger_waiters():
 
 
 # ---------------------------------------------------------------------------
+# Runtime Sources — agent-registered event sources via HTTP API
+# ---------------------------------------------------------------------------
+
+_runtime_sources = {}           # {name: source_dict}
+_runtime_sources_lock = threading.Lock()
+_scheduler_heap = []            # [(next_fire_time, source_name)]
+_scheduler_event = threading.Event()
+
+
+def _init_sources_table():
+    """Create the sources table if it doesn't exist."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sources (
+                    name        TEXT PRIMARY KEY,
+                    type        TEXT NOT NULL,
+                    config      TEXT NOT NULL,
+                    last_output TEXT,
+                    active      INTEGER DEFAULT 1,
+                    created_at  REAL
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _save_source_to_db(name, stype, config, last_output=None, active=True):
+    """Insert or replace a source in the DB."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO sources (name, type, config, last_output, active, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (name, stype, json.dumps(config), last_output, 1 if active else 0, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _update_source_output_db(name, output):
+    """Update last_output for a source."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute("UPDATE sources SET last_output = ? WHERE name = ?", (output, name))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _deactivate_source_db(name):
+    """Mark a source as inactive in the DB."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute("UPDATE sources SET active = 0 WHERE name = ?", (name,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _delete_source_db(name):
+    """Remove a source from the DB."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute("DELETE FROM sources WHERE name = ?", (name,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _load_sources_from_db():
+    """Load all active sources from the DB."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                "SELECT name, type, config, last_output, active FROM sources WHERE active = 1"
+            ).fetchall()
+            return [
+                {
+                    'name': r[0], 'type': r[1],
+                    'config': json.loads(r[2]),
+                    'last_output': r[3], 'active': bool(r[4]),
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+
+# --- Scheduler for interval-based sources (poll, heartbeat) ---
+
+def _scheduler_loop():
+    """Single scheduler thread manages all interval-based sources.
+
+    Uses a min-heap for O(log n) per tick. Wakes when new sources are added.
+    """
+    while True:
+        next_delay = None
+
+        with _runtime_sources_lock:
+            # Fire all expired items
+            while _scheduler_heap and _scheduler_heap[0][0] <= time.time():
+                _, name = heapq.heappop(_scheduler_heap)
+                source = _runtime_sources.get(name)
+                if source and source['active']:
+                    threading.Thread(
+                        target=_run_source_tick, args=(source,),
+                        daemon=True, name=f"tick-{name}"
+                    ).start()
+                    interval = source['config'].get('interval', 30)
+                    heapq.heappush(_scheduler_heap, (time.time() + interval, name))
+
+            if _scheduler_heap:
+                next_delay = max(0.1, _scheduler_heap[0][0] - time.time())
+
+        if next_delay is not None:
+            _scheduler_event.wait(timeout=next_delay)
+        else:
+            _scheduler_event.wait()
+        _scheduler_event.clear()
+
+
+def _run_source_tick(source):
+    """Execute a single tick for an interval source."""
+    stype = source['type']
+    name = source['name']
+
+    if stype == 'poll':
+        _run_poll_tick(source)
+    elif stype == 'heartbeat':
+        insert_event(
+            source=f"runtime:{name}",
+            type='heartbeat',
+            text='tick',
+            metadata={'source_type': 'heartbeat', 'name': name}
+        )
+        _notify_event_waiters()
+
+
+def _run_poll_tick(source):
+    """Run poll command and fire event if output changed."""
+    name = source['name']
+    config = source['config']
+    command = config['command']
+
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        output = 'ERROR: command timed out'
+    except Exception as e:
+        output = f'ERROR: {e}'
+
+    if config.get('diff', True):
+        if output == source.get('last_output'):
+            return  # No change
+
+    source['last_output'] = output
+    _update_source_output_db(name, output)
+
+    insert_event(
+        source=f"runtime:{name}",
+        type='poll_changed',
+        text=output,
+        metadata={'source_type': 'poll', 'name': name}
+    )
+    _notify_event_waiters()
+
+
+# --- Blocking source runners (command, watch, tail, ci) ---
+
+def _start_blocking_source(source):
+    """Start a blocking source in its own daemon thread."""
+    runners = {
+        'command': _run_command_source,
+        'watch': _run_watch_source,
+        'tail': _run_tail_source,
+        'ci': _run_ci_source,
+    }
+    runner = runners.get(source['type'])
+    if runner:
+        t = threading.Thread(
+            target=runner, args=(source,),
+            daemon=True, name=f"source-{source['name']}"
+        )
+        source['thread'] = t
+        t.start()
+
+
+def _run_command_source(source):
+    """Run a blocking command and fire event when it exits."""
+    name = source['name']
+    command = source['config']['command']
+
+    try:
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        source['process'] = proc
+        output, _ = proc.communicate()
+        output = (output or '').strip()
+        exit_code = proc.returncode
+    except Exception as e:
+        output = f'ERROR: {e}'
+        exit_code = -1
+
+    if not source['active']:
+        return
+
+    insert_event(
+        source=f"runtime:{name}",
+        type='command_completed',
+        text=output,
+        metadata={'source_type': 'command', 'name': name, 'exit_code': exit_code}
+    )
+    _notify_event_waiters()
+    source['active'] = False
+    _deactivate_source_db(name)
+
+
+def _run_watch_source(source):
+    """Watch files for changes. Re-arms automatically for continuous monitoring."""
+    name = source['name']
+    config = source['config']
+    paths = config['paths']
+    root = config.get('root', _project_root)
+
+    while source['active']:
+        try:
+            output = _watch_files_once(paths, root, source)
+        except Exception as e:
+            if source['active']:
+                sys.stderr.write(f"[sidecar] watch source '{name}' error: {e}\n")
+                time.sleep(5)
+            continue
+
+        if not source['active']:
+            return
+
+        insert_event(
+            source=f"runtime:{name}",
+            type='file_changed',
+            text=output,
+            metadata={'source_type': 'watch', 'name': name}
+        )
+        _notify_event_waiters()
+
+
+def _glob_to_regex(pattern):
+    """Convert shell glob to regex (matches file-change.sh logic)."""
+    result = pattern
+    result = result.replace('.', '\\.')
+    result = result.replace('**/', '___GS___')
+    result = result.replace('**', '___G___')
+    result = result.replace('*', '[^/]*')
+    result = result.replace('?', '[^/]')
+    result = result.replace('___GS___', '(.*/)?')
+    result = result.replace('___G___', '.*')
+    return result
+
+
+def _is_glob(path):
+    """Check if a path contains glob characters."""
+    return any(c in path for c in ('*', '?', '['))
+
+
+def _watch_files_once(paths, root, source):
+    """Block until a file in paths changes. Returns changed file path."""
+    has_globs = any(_is_glob(p) for p in paths)
+
+    if shutil.which('fswatch'):
+        args = ['fswatch', '-1']
+        if has_globs or len(paths) > 1:
+            args.append('-E')
+            abs_root = os.path.realpath(root)
+            escaped_root = abs_root.replace('.', '\\.')
+            for p in paths:
+                if _is_glob(p):
+                    regex = _glob_to_regex(p)
+                    args.extend(['--include', f'^{escaped_root}/{regex}$'])
+                else:
+                    abs_path = os.path.join(abs_root, p)
+                    if os.path.exists(abs_path):
+                        abs_path = os.path.realpath(abs_path)
+                    escaped = abs_path.replace('.', '\\.')
+                    args.extend(['--include', f'^{escaped}$'])
+            args.extend(['--exclude', '.*'])
+            args.append(root)
+        else:
+            target = paths[0]
+            if not os.path.isabs(target):
+                target = os.path.join(root, target)
+            args.append(target)
+
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, text=True)
+        source['process'] = proc
+        output = proc.stdout.read().strip()
+        proc.wait()
+        return output
+
+    elif shutil.which('inotifywait'):
+        args = ['inotifywait', '-r', '-e', 'modify', '-q']
+        if has_globs or len(paths) > 1:
+            abs_root = os.path.realpath(root)
+            escaped_root = abs_root.replace('.', '\\.')
+            regex_parts = []
+            for p in paths:
+                if _is_glob(p):
+                    regex_parts.append(f'^{escaped_root}/{_glob_to_regex(p)}$')
+                else:
+                    abs_path = os.path.join(abs_root, p)
+                    escaped = abs_path.replace('.', '\\.')
+                    regex_parts.append(f'^{escaped}$')
+            combined = '|'.join(regex_parts)
+            args.extend(['--include', combined])
+        args.append(root)
+
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, text=True)
+        source['process'] = proc
+        output = proc.stdout.read().strip()
+        proc.wait()
+        return output
+
+    else:
+        # Stat-polling fallback — direct files only
+        if has_globs:
+            raise RuntimeError("Glob patterns require fswatch or inotifywait")
+
+        mtimes = {}
+        for p in paths:
+            full = os.path.join(root, p) if not os.path.isabs(p) else p
+            try:
+                mtimes[full] = os.stat(full).st_mtime
+            except OSError:
+                mtimes[full] = 0
+
+        while source['active']:
+            time.sleep(1)
+            for full, prev_mtime in list(mtimes.items()):
+                try:
+                    current = os.stat(full).st_mtime
+                except OSError:
+                    current = 0
+                if current != prev_mtime:
+                    return full
+
+        return ''
+
+
+def _run_tail_source(source):
+    """Tail a file, collecting line chunks as events."""
+    name = source['name']
+    config = source['config']
+    filepath = config['file']
+    timeout = config.get('timeout', 10)
+    max_lines = config.get('max_lines', 100)
+
+    while source['active']:
+        try:
+            proc = subprocess.Popen(
+                ['tail', '-f', filepath],
+                stdout=subprocess.PIPE, text=True
+            )
+            source['process'] = proc
+
+            lines = []
+            while source['active'] and len(lines) < max_lines:
+                ready, _, _ = select.select([proc.stdout], [], [], timeout)
+                if not ready:
+                    break  # Timeout — emit what we have
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                lines.append(line.rstrip('\n'))
+
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+            if lines and source['active']:
+                insert_event(
+                    source=f"runtime:{name}",
+                    type='log_lines',
+                    text='\n'.join(lines),
+                    metadata={
+                        'source_type': 'tail', 'name': name,
+                        'line_count': len(lines), 'file': filepath
+                    }
+                )
+                _notify_event_waiters()
+            elif not lines:
+                time.sleep(1)
+
+        except Exception as e:
+            if source['active']:
+                sys.stderr.write(f"[sidecar] tail source '{name}' error: {e}\n")
+                time.sleep(5)
+
+
+def _run_ci_source(source):
+    """Watch a CI run until completion."""
+    name = source['name']
+    config = source['config']
+    run_id = None
+
+    arg = config.get('run_id') or config.get('branch', '')
+    if not arg:
+        source['active'] = False
+        return
+
+    try:
+        if str(arg).isdigit():
+            run_id = str(arg)
+        else:
+            result = subprocess.run(
+                ['gh', 'run', 'list', '--branch', str(arg), '--limit', '1',
+                 '--json', 'databaseId', '-q', '.[0].databaseId'],
+                capture_output=True, text=True, timeout=30
+            )
+            run_id = result.stdout.strip()
+            if not run_id:
+                insert_event(
+                    source=f"runtime:{name}",
+                    type='ci_error',
+                    text=f'No runs found for branch: {arg}',
+                    metadata={'source_type': 'ci', 'name': name}
+                )
+                _notify_event_waiters()
+                source['active'] = False
+                _deactivate_source_db(name)
+                return
+
+        proc = subprocess.Popen(
+            ['gh', 'run', 'watch', run_id, '--exit-status'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        source['process'] = proc
+        output, _ = proc.communicate()
+        output = (output or '').strip()
+        exit_code = proc.returncode
+
+    except Exception as e:
+        output = f'ERROR: {e}'
+        exit_code = -1
+
+    if not source['active']:
+        return
+
+    insert_event(
+        source=f"runtime:{name}",
+        type='ci_completed',
+        text=output,
+        metadata={
+            'source_type': 'ci', 'name': name,
+            'run_id': run_id or str(arg),
+            'exit_code': exit_code
+        }
+    )
+    _notify_event_waiters()
+    source['active'] = False
+    _deactivate_source_db(name)
+
+
+# --- Webhook handler factory ---
+
+def _make_webhook_handler(source_name):
+    """Create an HTTP handler for a webhook source."""
+    def handler(request_handler, params=None):
+        body = request_handler._read_body().decode('utf-8', errors='replace')
+        request_handler.send_response(200)
+        request_handler.send_header('Content-Type', 'application/json')
+        request_handler.end_headers()
+        request_handler.wfile.write(b'{"ok":true}')
+
+        event_data = {
+            'method': request_handler.command,
+            'path': request_handler.path,
+            'body': body,
+        }
+
+        insert_event(
+            source=f"runtime:{source_name}",
+            type='webhook_received',
+            text=json.dumps(event_data),
+            metadata={'source_type': 'webhook', 'name': source_name}
+        )
+        _notify_event_waiters()
+
+    return handler
+
+
+# --- Source lifecycle management ---
+
+def _register_runtime_source(name, stype, config):
+    """Register a new runtime source. Returns (success, message)."""
+    valid_types = ('poll', 'heartbeat', 'command', 'watch', 'tail', 'ci', 'webhook')
+    if stype not in valid_types:
+        return False, f"Invalid type '{stype}'. Valid: {', '.join(valid_types)}"
+
+    # Validate required config per type
+    if stype == 'poll':
+        if 'command' not in config:
+            return False, "poll requires 'command'"
+        config.setdefault('interval', 30)
+        config.setdefault('diff', True)
+    elif stype == 'heartbeat':
+        config.setdefault('interval', 60)
+    elif stype == 'command':
+        if 'command' not in config:
+            return False, "command requires 'command'"
+    elif stype == 'watch':
+        if 'paths' not in config:
+            return False, "watch requires 'paths' (list)"
+        if isinstance(config['paths'], str):
+            config['paths'] = [config['paths']]
+    elif stype == 'tail':
+        if 'file' not in config:
+            return False, "tail requires 'file'"
+        config.setdefault('timeout', 10)
+        config.setdefault('max_lines', 100)
+    elif stype == 'ci':
+        if 'run_id' not in config and 'branch' not in config:
+            return False, "ci requires 'run_id' or 'branch'"
+    elif stype == 'webhook':
+        if 'path' not in config:
+            return False, "webhook requires 'path'"
+
+    with _runtime_sources_lock:
+        if name in _runtime_sources:
+            _stop_source(name)
+
+        source = {
+            'name': name,
+            'type': stype,
+            'config': config,
+            'active': True,
+            'last_output': None,
+            'process': None,
+            'thread': None,
+        }
+        _runtime_sources[name] = source
+
+    _save_source_to_db(name, stype, config)
+    _start_source(source)
+
+    sys.stderr.write(f"[sidecar] Runtime source registered: {name} ({stype})\n")
+    return True, f"Source '{name}' registered"
+
+
+def _start_source(source):
+    """Start a source based on its type."""
+    stype = source['type']
+
+    if stype in ('poll', 'heartbeat'):
+        interval = source['config'].get('interval', 30)
+
+        # For poll, capture baseline immediately
+        if stype == 'poll':
+            try:
+                result = subprocess.run(
+                    source['config']['command'], shell=True,
+                    capture_output=True, text=True, timeout=30
+                )
+                source['last_output'] = result.stdout.strip()
+                _update_source_output_db(source['name'], source['last_output'])
+            except Exception:
+                source['last_output'] = None
+
+        with _runtime_sources_lock:
+            heapq.heappush(_scheduler_heap, (time.time() + interval, source['name']))
+        _scheduler_event.set()
+
+    elif stype in ('command', 'watch', 'tail', 'ci'):
+        _start_blocking_source(source)
+
+    elif stype == 'webhook':
+        path = source['config']['path']
+        if not path.startswith('/'):
+            path = '/' + path
+        handler = _make_webhook_handler(source['name'])
+        _plugin_routes[('POST', path)] = handler
+        _plugin_routes[('GET', path)] = handler
+        sys.stderr.write(f"[sidecar] Webhook route registered: POST {path}\n")
+
+
+def _stop_source(name):
+    """Stop a running source. Safe to call from any context."""
+    source = _runtime_sources.get(name)
+    if not source:
+        return
+
+    source['active'] = False
+
+    proc = source.get('process')
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    if source['type'] == 'webhook':
+        path = source['config'].get('path', '')
+        if not path.startswith('/'):
+            path = '/' + path
+        _plugin_routes.pop(('POST', path), None)
+        _plugin_routes.pop(('GET', path), None)
+
+
+def _remove_runtime_source(name):
+    """Remove a source entirely. Returns (success, message)."""
+    with _runtime_sources_lock:
+        if name not in _runtime_sources:
+            return False, f"Source '{name}' not found"
+        _stop_source(name)
+        del _runtime_sources[name]
+
+    _delete_source_db(name)
+    sys.stderr.write(f"[sidecar] Runtime source removed: {name}\n")
+    return True, f"Source '{name}' removed"
+
+
+def _list_runtime_sources():
+    """List all runtime sources with status."""
+    with _runtime_sources_lock:
+        return [
+            {
+                'name': s['name'],
+                'type': s['type'],
+                'active': s['active'],
+                'config': s['config'],
+            }
+            for s in _runtime_sources.values()
+        ]
+
+
+def _restore_sources():
+    """Restore active sources from DB on startup."""
+    saved = _load_sources_from_db()
+    for s in saved:
+        source = {
+            'name': s['name'],
+            'type': s['type'],
+            'config': s['config'],
+            'active': True,
+            'last_output': s['last_output'],
+            'process': None,
+            'thread': None,
+        }
+        with _runtime_sources_lock:
+            _runtime_sources[s['name']] = source
+        _start_source(source)
+        sys.stderr.write(f"[sidecar] Restored source: {s['name']} ({s['type']})\n")
+
+
+# ---------------------------------------------------------------------------
 # Query string parser
 # ---------------------------------------------------------------------------
 
@@ -654,7 +1333,9 @@ class SidecarHandler(BaseHTTPRequestHandler):
                 handler(self)
                 return
 
-            if path == '/voice':
+            if path == '/source':
+                self._handle_source_post()
+            elif path == '/voice':
                 self._handle_voice_event()
             elif path == '/respond':
                 self._handle_respond()
@@ -778,6 +1459,8 @@ class SidecarHandler(BaseHTTPRequestHandler):
 
             if path == '/watch':
                 self._handle_watch_delete()
+            elif path == '/source':
+                self._handle_source_delete()
             else:
                 self._send_json({"error": "not found"}, 404)
         except Exception as e:
@@ -824,7 +1507,9 @@ class SidecarHandler(BaseHTTPRequestHandler):
                 handler(self, params)
                 return
 
-            if path == '/events':
+            if path == '/sources':
+                self._handle_sources_get(params)
+            elif path == '/events':
                 self._handle_events(params)
             elif path == '/responses':
                 self._handle_responses(params)
@@ -953,20 +1638,65 @@ class SidecarHandler(BaseHTTPRequestHandler):
         watches = _list_watches(plugin)
         self._send_json(watches)
 
+    # ---- Source management routes ----
+
+    def _handle_source_post(self):
+        """POST /source — register a runtime event source."""
+        body = self._read_body()
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self._send_json({"error": "invalid json"}, 400)
+            return
+
+        name = data.get('name', '').strip()
+        stype = data.get('type', '').strip()
+        if not name or not stype:
+            self._send_json({"error": "name and type are required"}, 400)
+            return
+
+        config = {k: v for k, v in data.items() if k not in ('name', 'type')}
+        ok, msg = _register_runtime_source(name, stype, config)
+        self._send_json({"ok": ok, "message": msg}, 200 if ok else 400)
+
+    def _handle_source_delete(self):
+        """DELETE /source — remove a runtime event source."""
+        body = self._read_body()
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self._send_json({"error": "invalid json"}, 400)
+            return
+
+        name = data.get('name', '').strip()
+        if not name:
+            self._send_json({"error": "name is required"}, 400)
+            return
+
+        ok, msg = _remove_runtime_source(name)
+        self._send_json({"ok": ok, "message": msg}, 200 if ok else 404)
+
+    def _handle_sources_get(self, params=None):
+        """GET /sources — list active runtime sources."""
+        sources = _list_runtime_sources()
+        self._send_json(sources)
+
     # ---- Health ----
 
     def _handle_health(self):
-        """GET /health — status with pending counts, plugins, watches."""
+        """GET /health — status with pending counts, plugins, watches, sources."""
         counts = _pending_counts()
         counts['ledger_entries'] = _ledger_max_id()
         plugins = [{"name": name, "path": path} for name, path in _loaded_plugins]
         watches = _list_watches()
+        sources = _list_runtime_sources()
         self._send_json({
             "status": "ok",
             "version": __version__,
             "pending": counts,
             "plugins": plugins,
             "watches": watches,
+            "sources": sources,
             "db": DB_PATH,
             "project_root": _project_root,
         })
@@ -1119,6 +1849,7 @@ def _cleanup_metadata():
 def main():
     _init_db()
     _ensure_indexes()
+    _init_sources_table()
 
     # Load plugins from manifest
     _load_plugins()
@@ -1143,6 +1874,12 @@ def main():
     for name, poller_func in _plugin_pollers:
         t = threading.Thread(target=poller_func, daemon=True, name=f"poller-{name}")
         t.start()
+
+    # Start runtime source scheduler
+    threading.Thread(target=_scheduler_loop, daemon=True, name='source-scheduler').start()
+
+    # Restore runtime sources from DB
+    _restore_sources()
 
     server = ThreadingHTTPServer(('0.0.0.0', _requested_port), SidecarHandler)
     actual_port = server.server_address[1]
@@ -1172,6 +1909,9 @@ def main():
     sys.stderr.write(f"[sidecar] Routes:\n")
     for (method, path), _ in sorted(_plugin_routes.items()):
         sys.stderr.write(f"  {method:6s} {path:<20s} — plugin\n")
+    sys.stderr.write(f"  POST   /source            — Register runtime source\n")
+    sys.stderr.write(f"  DELETE /source            — Remove runtime source\n")
+    sys.stderr.write(f"  GET    /sources           — List runtime sources\n")
     sys.stderr.write(f"  POST   /voice             — Voice transcripts\n")
     sys.stderr.write(f"  POST   /respond           — Agent posts responses\n")
     sys.stderr.write(f"  POST   /ledger            — Colony ledger writes\n")
@@ -1181,7 +1921,7 @@ def main():
     sys.stderr.write(f"  GET    /responses?wait=true — Pick up responses\n")
     sys.stderr.write(f"  GET    /ledger?wait=true  — Colony ledger tail\n")
     sys.stderr.write(f"  GET    /watches           — List active watches\n")
-    sys.stderr.write(f"  GET    /health            — Status + plugins + watches\n")
+    sys.stderr.write(f"  GET    /health            — Status + plugins + watches + sources\n")
 
     try:
         server.serve_forever()

@@ -1,36 +1,35 @@
 ---
-description: Start a one-shot HTTP server exposed via ngrok tunnel. Use for receiving webhooks from external services like GitHub, Stripe, or any service that needs a public URL to POST to.
-argument-hint: [port=9999] [tunnel-name=claude-hook] [subdomain=]
+description: Register a webhook endpoint exposed via ngrok tunnel. Use for receiving webhooks from external services like GitHub, Stripe, or any service that needs a public URL.
+argument-hint: [path=/hook] [subdomain=]
 allowed-tools: Bash, Read
 ---
 
-Start a public webhook listener as a background task:
+Register a webhook source on the sidecar and report the ngrok public URL.
 
+Parse `$ARGUMENTS` for optional path (default: `/hook`) and optional ngrok subdomain.
+
+1. Register the webhook source:
 ```
-Bash(command="${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh webhook-public $ARGUMENTS", run_in_background=true)
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-register.py' webhook 'SOURCE_NAME' '/PATH'")
 ```
 
-This automatically creates an ngrok tunnel (reuses an existing ngrok agent if running, or starts one). The tunnel is cleaned up when the webhook fires or the task is stopped.
+2. Check if ngrok is tunneling to the sidecar port. Read `.claude/sidecar.json` for the port, then:
+```
+Bash(command="curl -sf http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c \"import sys,json; tunnels=json.load(sys.stdin).get('tunnels',[]); [print(t['public_url']) for t in tunnels if 'https' in t.get('public_url','')]\" 2>/dev/null || echo 'ngrok not running'")
+```
 
-**Args:**
-- `port` — local port for the HTTP server (default: 9999)
-- `tunnel-name` — ngrok tunnel name for management (default: claude-hook)
-- `subdomain` — ngrok vanity subdomain for a stable URL (Pro/Business plans).
-  e.g., `9999 my-hook my-app` → `https://my-app.ngrok.io` (same URL every time).
-  Omit for a random URL.
+3. If ngrok is not running, start it tunneled to the sidecar port:
+```
+Bash(command="ngrok http SIDECAR_PORT --log=false &>/dev/null &")
+```
 
-**Two-phase output:**
+4. Report the public webhook URL to the user: `https://<ngrok-domain>/PATH`
 
-1. **Immediately** (readable via non-blocking `TaskOutput`): `WEBHOOK_URL=https://xxxx.ngrok.app`
-   — Use this URL to register with external services (GitHub webhooks, etc.)
-2. **When webhook fires**: JSON event payload on subsequent lines
+Events arrive through the sidecar drain — look for `source: "runtime:SOURCE_NAME"` with `type: "webhook_received"`.
 
-**Workflow:**
-1. Start the background listener
-2. Read the URL with `TaskOutput(block=false)` — it appears on the first line immediately
-3. Register the URL with the external service (e.g., GitHub webhook config)
-4. Wait for the `<task-notification>` — the webhook has arrived
-5. Read the full output, parse the event JSON (line 2+), and react
-6. Start a new listener if you want to receive more webhooks
+To stop:
+```
+Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-remove.py' 'SOURCE_NAME'")
+```
 
-**Requirements:** ngrok must be installed and authenticated (`ngrok config add-authtoken <token>`).
+**Requirements:** ngrok must be installed and authenticated.

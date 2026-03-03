@@ -6,9 +6,8 @@ changes, services coming up — use the `/el:*` slash commands instead of pollin
 ## Why
 
 Polling burns turns and tokens on sleep-check-repeat loops. Event listeners
-launch a background task that blocks until the event occurs. You do nothing
-while waiting. When the event fires, you get a `<task-notification>`, read the
-output, and react.
+register a source with the sidecar that fires when the event occurs. You do
+nothing while waiting. Events arrive through the drain loop, and you react.
 
 ## Commands
 
@@ -17,13 +16,16 @@ output, and react.
 | `/el:ci-watch <run-id \| branch>` | Waiting for a GitHub Actions run to finish |
 | `/el:pr-checks <pr-number>` | Waiting for all PR checks to resolve |
 | `/el:log-tail <file> [timeout] [max_lines]` | Tailing a log file for new output |
-| `/el:file-change <path>` | Watching a file for modifications |
-| `/el:webhook [port]` | Receiving an HTTP request on localhost |
-| `/el:webhook-public [port] [name] [subdomain]` | Receiving an HTTP request via ngrok tunnel |
+| `/el:file-change [--root dir] <path>...` | Watching files for modifications |
+| `/el:webhook [path]` | Receiving HTTP requests on the sidecar |
+| `/el:webhook-public [path] [subdomain]` | Receiving HTTP requests via ngrok tunnel |
+| `/el:poll <interval> <command>` | Polling a command for output changes |
 | `/el:listen <command...>` | Running any blocking command as an event source |
+| `/el:context-sync [root]` | Watching trusted context files for changes |
 | `/el:sidecar start [port]` | Starting the event hub (discovers plugins automatically) |
 | `/el:sidecar stop` | Stopping the running sidecar |
 | `/el:sidecar status` | Checking sidecar health and loaded plugins |
+| `/el:sidecar sources` | Listing active runtime sources |
 | `/el:list` | Seeing all available event sources |
 
 ## Common Patterns
@@ -34,37 +36,33 @@ output, and react.
 **After opening a PR**, use `/el:pr-checks <pr-number>` to wait for all
 checks to pass or fail.
 
-**When tailing logs**, use `/el:log-tail <file>`. When the chunk arrives,
-process it and start another listener for the next chunk.
+**When tailing logs**, use `/el:log-tail <file>`. Log chunks arrive as
+events through the drain — no need to restart the listener.
 
 **When waiting for a service**, use `/el:listen` with a blocking command like
 `while ! curl -s localhost:3000/health; do sleep 1; done`.
 
-**Run multiple listeners concurrently** — they are independent background
-tasks. Handle whichever fires first.
+**Run multiple sources concurrently** — they all feed into the same drain.
+Handle events by checking the `source` field.
 
 ## Rules
 
-- Never poll in a loop when an event listener exists for that source.
-- Prefer `/el:ci-watch` over `gh run watch` — it integrates with the
-  background task notification system.
-- After handling an event, re-subscribe if you need continuous monitoring.
-- **Do not add `&` to commands when using `run_in_background=true`.** The
-  `run_in_background` parameter already handles backgrounding. Adding `&`
-  double-backgrounds the command: the shell exits immediately, the task system
-  reports "completed", and the listener continues as an orphan with no
-  notification mechanism.
+- Never poll in a loop when an event source exists for that use case.
+- Prefer `/el:ci-watch` over `gh run watch` — it integrates with the sidecar.
+- Watch sources (file-change, context-sync) re-arm automatically.
+- One-shot sources (ci-watch, listen) deactivate after firing.
+- Use `/el:sidecar sources` to see what's registered.
 
 ## Sidecar Architecture
 
-The sidecar (`el-sidecar.py`) is a source-agnostic event hub with a self-registering
-plugin system. It uses `ThreadingHTTPServer` so long-poll requests don't block ingestion.
+The sidecar (`el-sidecar.py`) is a source-agnostic event hub with two parallel
+systems for event sources:
 
-### Plugin System
+### 1. Plugin Pollers (static)
 
-Plugins self-register via `sidecar/plugin.py` with a `register(api)` function. On startup,
-the sidecar reads `~/.claude/plugins/installed_plugins.json` and loads any installed plugin
-that has this file. Six hooks are available:
+Plugins self-register via `sidecar/plugin.py` with a `register(api)` function.
+On startup, the sidecar reads `~/.claude/plugins/installed_plugins.json` and
+loads plugins automatically. Six hooks are available:
 
 | Hook | Purpose |
 |------|---------|
@@ -75,11 +73,36 @@ that has this file. Six hooks are available:
 | `register_enrichment(name, func)` | Enrich events during insertion |
 | `register_watch_handler(name, add, remove)` | PR-scoped watch callbacks |
 
+### 2. Runtime Sources (dynamic)
+
+Agents register event sources at runtime via HTTP API:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /source` | Register a new source |
+| `DELETE /source` | Remove a source by name |
+| `GET /sources` | List active sources with status |
+
+Source types:
+
+| Type | Behavior | Key Config |
+|------|----------|------------|
+| `poll` | Run command every N seconds, fire on output change | `command`, `interval`, `diff` |
+| `heartbeat` | Insert neutral tick event every N seconds | `interval` |
+| `watch` | Watch files for modifications | `paths` (list), `root` |
+| `tail` | Tail a log file, insert chunks as events | `file`, `timeout`, `max_lines` |
+| `ci` | Watch a GitHub Actions run until completion | `run_id` or `branch` |
+| `command` | Run blocking command, insert event when done | `command` |
+| `webhook` | Register HTTP route, fire on request | `path` |
+
+Both systems insert events into the same DB and arrive through the same drain.
+
 ### Per-Agent Isolation
 
 - **Port**: Auto-assigned (port 0) unless `SIDECAR_PORT` is set. Actual port in `.claude/sidecar.json`.
 - **DB**: `/tmp/el-sidecar-{hash}.db` — deterministic per project, no collisions.
 - **Metadata**: `.claude/sidecar.json` with port, PID, DB path. Drain commands read this.
+- **Sources**: Persisted in DB, restored on sidecar restart.
 
 ### Single Drain Pattern
 
