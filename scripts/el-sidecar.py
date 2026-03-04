@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import select
+import socket
 import shutil
 import signal
 import sqlite3
@@ -306,12 +307,14 @@ def _insert_raw_event(source, headers, body):
 # Event retrieval
 # ---------------------------------------------------------------------------
 
-def _pick_events(source=None, sender_exclude=None):
+def _pick_events(source=None, sender_exclude=None, return_ids=False):
     """Return all unpicked events, mark them picked up.
 
     Filters:
         source         — exact match on source field
         sender_exclude — exclude events where metadata.sender matches
+
+    If return_ids=True, returns (events, picked_ids) tuple for rollback support.
     """
     with _db_lock:
         conn = _get_db()
@@ -391,7 +394,118 @@ def _pick_events(source=None, sender_exclude=None):
                 callback(events)
             except Exception as e:
                 sys.stderr.write(f"[sidecar] on_pick callback '{name}' error: {e}\n")
+    if return_ids:
+        return events, pick_ids
     return events
+
+
+def _peek_events(source=None, sender_exclude=None):
+    """Return unpicked events WITHOUT marking them picked. Returns (events, all_ids).
+
+    all_ids includes both delivered and filtered event IDs (filtered ones should
+    still be marked picked to avoid reprocessing).
+    """
+    with _db_lock:
+        conn = _get_db()
+        try:
+            if source:
+                rows = conn.execute(
+                    "SELECT id, source, ts, user_id, text, channel, type, thread_ts, bot_id, "
+                    "associations, metadata, received_at "
+                    "FROM events WHERE picked_up = 0 AND source = ? "
+                    "ORDER BY received_at ASC, id ASC",
+                    (source,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, source, ts, user_id, text, channel, type, thread_ts, bot_id, "
+                    "associations, metadata, received_at "
+                    "FROM events WHERE picked_up = 0 "
+                    "ORDER BY received_at ASC, id ASC"
+                ).fetchall()
+            if not rows:
+                return [], []
+            events = []
+            all_ids = []
+            for row in rows:
+                (eid, src, ts, user_id, text, channel, etype,
+                 thread_ts, bot_id, assoc_json, meta_json, received_at) = row
+                evt = {'source': src}
+                if ts:
+                    evt['ts'] = ts
+                if user_id:
+                    evt['user'] = user_id
+                if text:
+                    evt['text'] = text
+                if channel:
+                    evt['channel'] = channel
+                if etype:
+                    evt['type'] = etype
+                if thread_ts:
+                    evt['thread_ts'] = thread_ts
+                if bot_id:
+                    evt['bot_id'] = bot_id
+                if not ts:
+                    evt['id'] = eid
+                    evt['created_at'] = received_at
+                if assoc_json:
+                    try:
+                        evt['associations'] = json.loads(assoc_json)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                if meta_json:
+                    try:
+                        evt['metadata'] = json.loads(meta_json)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                all_ids.append(eid)
+                # Filter out events from excluded sender
+                if sender_exclude and evt.get('metadata', {}).get('sender') == sender_exclude:
+                    continue
+                events.append(evt)
+        finally:
+            conn.close()
+    return events, all_ids
+
+
+def _mark_events_picked(event_ids):
+    """Mark specific event IDs as picked up."""
+    if not event_ids:
+        return
+    with _db_lock:
+        conn = _get_db()
+        try:
+            placeholders = ','.join('?' for _ in event_ids)
+            conn.execute(
+                f"UPDATE events SET picked_up = 1 WHERE id IN ({placeholders})",
+                event_ids,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    # Notify on_pick callbacks
+    # (events list not available here — skip callbacks for peek/commit path)
+
+
+def _unpick_events(event_ids):
+    """Restore events to unpicked state (e.g. after failed send to dead client)."""
+    ids = [eid for eid in event_ids if isinstance(eid, int)]
+    if not ids:
+        return
+    with _db_lock:
+        conn = _get_db()
+        try:
+            placeholders = ','.join('?' for _ in ids)
+            conn.execute(
+                f"UPDATE events SET picked_up = 0 WHERE id IN ({placeholders})",
+                ids,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    # Wake any waiting drains so they can pick up the restored events
+    with _event_cond:
+        _event_cond.notify_all()
 
 
 def _pending_count(source=None):
@@ -1349,6 +1463,7 @@ class SidecarHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()  # Force TCP send — triggers BrokenPipeError on dead client
 
     def _read_body(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -1572,31 +1687,53 @@ class SidecarHandler(BaseHTTPRequestHandler):
     def _handle_events(self, params):
         """GET /events — drain all pending events from all sources.
 
-        With wait=true, blocks until events are available (never returns []).
+        With wait=true, blocks until events are available or timeout expires.
         Without wait, returns immediately (may be []).
 
         Params:
             wait           — block until events available
+            timeout        — max seconds to wait (default 480, i.e. 8 min)
             source         — exact match on source field
             sender_exclude — drop events where metadata.sender matches
         """
         wait = params.get('wait', '').lower() == 'true'
         source = params.get('source')
         sender_exclude = params.get('sender_exclude')
+        timeout = float(params.get('timeout', '480'))
 
         if wait:
-            while True:
-                # Block until events exist — no timeout, no empty returns
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                # Block until events exist or timeout
                 with _event_cond:
                     while _pending_count(source) == 0:
-                        _event_cond.wait(timeout=5.0)
+                        left = deadline - time.time()
+                        if left <= 0:
+                            break
+                        _event_cond.wait(timeout=min(5.0, left))
+                    if _pending_count(source) == 0:
+                        break  # Timed out
                 # Burst collection — wait 500ms for more events to batch
                 time.sleep(0.5)
-                events = _pick_events(source, sender_exclude=sender_exclude)
+                # Peek first (don't mark picked), then send, then commit
+                events, event_ids = _peek_events(source, sender_exclude=sender_exclude)
                 if events:
-                    self._send_json(events)
+                    try:
+                        self._send_json(events)
+                        self.wfile.flush()
+                        # Send succeeded — now mark as picked
+                        _mark_events_picked(event_ids)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass  # Client gone — events stay unpicked for next drain
                     return
-                # All pending events were filtered out; wait for more
+                # All pending events were filtered out; mark them picked and wait for more
+                if event_ids:
+                    _mark_events_picked(event_ids)
+            # Timeout expired — return empty so handler thread exits cleanly
+            self._send_json([])
         else:
             events = _pick_events(source, sender_exclude=sender_exclude)
             self._send_json(events)

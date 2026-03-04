@@ -117,20 +117,30 @@ system.
 ### Correct Pattern
 
 ```
-Bash(command='curl -sf "http://localhost:PORT/events?wait=true"', run_in_background=true)
+Bash(command='curl -sf "http://localhost:PORT/events?wait=true&timeout=480" --max-time 540', run_in_background=true, timeout=600000)
 ```
 
 The lifecycle:
 
 1. Read `.claude/sidecar.json` to get the current port
-2. Start drain as a **background** Bash task (`run_in_background: true`)
+2. Start drain as a **background** Bash task (`run_in_background: true`, `timeout: 600000`)
 3. Session is free to do other work while the drain blocks at the sidecar
 4. When events arrive, curl returns → task completes → `<task-notification>` delivered
 5. Process events (route by `source` field)
-6. Re-arm drain immediately with another background Bash task
+6. Re-arm drain immediately — including after empty `[]` timeout returns
 
-With `wait=true`, the sidecar blocks forever — it never returns `[]`. The curl
-only completes when there are actual events to deliver.
+### Three-Layer Timeout
+
+| Layer | Value | Purpose |
+|-------|-------|---------|
+| Server `?timeout=480` | 480s (8 min) | Handler exits cleanly, returns `[]` |
+| curl `--max-time 540` | 540s (9 min) | Safety net if server hangs |
+| CC `timeout=600000` | 600s (10 min) | Background task ceiling |
+
+Each layer is a backstop for the one above. The server always closes the
+connection before curl disconnects, preventing ghost handler threads from
+consuming events. This is how `wait=true` achieves instant responsiveness
+with zero wasted turns — at most one empty `[]` return every 8 minutes.
 
 ### Port Discovery
 
@@ -201,10 +211,5 @@ When the sidecar restarts on a new port:
 SIDECAR_JSON="$(pwd)/.claude/sidecar.json"
 PORT=$(python3 -c "import json; print(json.load(open('$SIDECAR_JSON'))['port'])")
 SIDECAR_URL="http://localhost:$PORT"
-while true; do
-  RESPONSE=$(curl -sf "${SIDECAR_URL}/events?wait=true" 2>/dev/null) || { sleep 5; continue; }
-  if [ -z "$RESPONSE" ]; then continue; fi
-  echo "$RESPONSE"
-  exit 0
-done
+curl -sf "${SIDECAR_URL}/events?wait=true&timeout=480" --max-time 540
 ```
