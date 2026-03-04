@@ -306,8 +306,13 @@ def _insert_raw_event(source, headers, body):
 # Event retrieval
 # ---------------------------------------------------------------------------
 
-def _pick_events(source=None):
-    """Return all unpicked events, mark them picked up."""
+def _pick_events(source=None, sender_exclude=None):
+    """Return all unpicked events, mark them picked up.
+
+    Filters:
+        source         — exact match on source field
+        sender_exclude — exclude events where metadata.sender matches
+    """
     with _db_lock:
         conn = _get_db()
         try:
@@ -329,6 +334,7 @@ def _pick_events(source=None):
             if not rows:
                 return []
             events = []
+            pick_ids = []
             for row in rows:
                 (eid, src, ts, user_id, text, channel, etype,
                  thread_ts, bot_id, assoc_json, meta_json, received_at) = row
@@ -360,14 +366,19 @@ def _pick_events(source=None):
                         evt['metadata'] = json.loads(meta_json)
                     except (json.JSONDecodeError, ValueError):
                         pass
+                # Filter out events from excluded sender
+                if sender_exclude and evt.get('metadata', {}).get('sender') == sender_exclude:
+                    pick_ids.append(eid)  # still mark picked so it doesn't reappear
+                    continue
                 events.append(evt)
+                pick_ids.append(eid)
             # Mark picked up
-            ids = [row[0] for row in rows]
-            placeholders = ','.join('?' for _ in ids)
-            conn.execute(
-                f"UPDATE events SET picked_up = 1 WHERE id IN ({placeholders})",
-                ids,
-            )
+            if pick_ids:
+                placeholders = ','.join('?' for _ in pick_ids)
+                conn.execute(
+                    f"UPDATE events SET picked_up = 1 WHERE id IN ({placeholders})",
+                    pick_ids,
+                )
             conn.commit()
         finally:
             conn.close()
@@ -628,7 +639,8 @@ def _notify_ledger_waiters():
 
 _runtime_sources = {}           # {name: source_dict}
 _runtime_sources_lock = threading.Lock()
-_scheduler_heap = []            # [(next_fire_time, source_name)]
+_scheduler_heap = []            # [(next_fire_time, source_name, generation)]
+_source_generation = {}         # {source_name: int} — incremented on each start
 _scheduler_event = threading.Event()
 
 
@@ -733,7 +745,10 @@ def _scheduler_loop():
         with _runtime_sources_lock:
             # Fire all expired items
             while _scheduler_heap and _scheduler_heap[0][0] <= time.time():
-                _, name = heapq.heappop(_scheduler_heap)
+                _, name, gen = heapq.heappop(_scheduler_heap)
+                # Skip stale entries from previous generations
+                if gen != _source_generation.get(name):
+                    continue
                 source = _runtime_sources.get(name)
                 if source and source['active']:
                     threading.Thread(
@@ -741,7 +756,7 @@ def _scheduler_loop():
                         daemon=True, name=f"tick-{name}"
                     ).start()
                     interval = source['config'].get('interval', 30)
-                    heapq.heappush(_scheduler_heap, (time.time() + interval, name))
+                    heapq.heappush(_scheduler_heap, (time.time() + interval, name, gen))
 
             if _scheduler_heap:
                 next_delay = max(0.1, _scheduler_heap[0][0] - time.time())
@@ -1205,7 +1220,9 @@ def _start_source(source):
                 source['last_output'] = None
 
         with _runtime_sources_lock:
-            heapq.heappush(_scheduler_heap, (time.time() + interval, source['name']))
+            gen = _source_generation.get(source['name'], 0) + 1
+            _source_generation[source['name']] = gen
+            heapq.heappush(_scheduler_heap, (time.time() + interval, source['name'], gen))
         _scheduler_event.set()
 
     elif stype in ('command', 'watch', 'tail', 'ci'):
@@ -1228,6 +1245,8 @@ def _stop_source(name):
         return
 
     source['active'] = False
+    # Bump generation so stale heap entries are ignored on pop
+    _source_generation[name] = _source_generation.get(name, 0) + 1
 
     proc = source.get('process')
     if proc and proc.poll() is None:
@@ -1555,20 +1574,32 @@ class SidecarHandler(BaseHTTPRequestHandler):
 
         With wait=true, blocks until events are available (never returns []).
         Without wait, returns immediately (may be []).
+
+        Params:
+            wait           — block until events available
+            source         — exact match on source field
+            sender_exclude — drop events where metadata.sender matches
         """
         wait = params.get('wait', '').lower() == 'true'
         source = params.get('source')
+        sender_exclude = params.get('sender_exclude')
 
         if wait:
-            # Block until events exist — no timeout, no empty returns
-            with _event_cond:
-                while _pending_count(source) == 0:
-                    _event_cond.wait(timeout=5.0)
-            # Burst collection — wait 500ms for more events to batch
-            time.sleep(0.5)
-
-        events = _pick_events(source)
-        self._send_json(events)
+            while True:
+                # Block until events exist — no timeout, no empty returns
+                with _event_cond:
+                    while _pending_count(source) == 0:
+                        _event_cond.wait(timeout=5.0)
+                # Burst collection — wait 500ms for more events to batch
+                time.sleep(0.5)
+                events = _pick_events(source, sender_exclude=sender_exclude)
+                if events:
+                    self._send_json(events)
+                    return
+                # All pending events were filtered out; wait for more
+        else:
+            events = _pick_events(source, sender_exclude=sender_exclude)
+            self._send_json(events)
 
     def _handle_responses(self, params):
         """GET /responses — client picks up responses."""
