@@ -78,8 +78,15 @@ def _parse_args():
         else:
             i += 1
 
-    port = port or int(os.environ.get('SIDECAR_PORT', '0'))
     project_root = project_root or os.environ.get('SIDECAR_PROJECT_ROOT', os.getcwd())
+    if not port:
+        env_port = os.environ.get('SIDECAR_PORT', '')
+        if env_port:
+            port = int(env_port)
+        else:
+            # Deterministic port from project root hash (ephemeral range 49152-65535)
+            h = hashlib.sha256(os.path.abspath(project_root).encode()).hexdigest()
+            port = 49152 + (int(h[:8], 16) % (65535 - 49152))
 
     return port, project_root
 
