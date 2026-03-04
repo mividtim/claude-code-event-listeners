@@ -99,7 +99,7 @@ Both systems insert events into the same DB and arrive through the same drain.
 
 ### Per-Agent Isolation
 
-- **Port**: Auto-assigned (port 0) unless `SIDECAR_PORT` is set. Actual port in `.claude/sidecar.json`.
+- **Port**: Deterministic per project — derived from `SHA-256(project_root)` in ephemeral range 49152-65535. Stable across restarts. Override with `SIDECAR_PORT` env var. Actual port in `.claude/sidecar.json`.
 - **DB**: `/tmp/el-sidecar-{hash}.db` — deterministic per project, no collisions.
 - **Metadata**: `.claude/sidecar.json` with port, PID, DB path. Drain commands read this.
 - **Sources**: Persisted in DB, restored on sidecar restart.
