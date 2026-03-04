@@ -104,16 +104,95 @@ Both systems insert events into the same DB and arrive through the same drain.
 - **Metadata**: `.claude/sidecar.json` with port, PID, DB path. Drain commands read this.
 - **Sources**: Persisted in DB, restored on sidecar restart.
 
-### Single Drain Pattern
+## Draining Events
 
-Use exactly ONE consumer draining events from the sidecar. Multiple consumers compete
-for the `picked_up` flag, causing missed events. The correct architecture:
+**This is the most important section.** The drain is how your Claude session
+receives events from the sidecar. Getting this wrong breaks the entire event
+system.
 
-1. One `el:listen` background task running a drain script
-2. The drain script long-polls `GET /events?wait=true`
-3. On receiving events, output them to stdout and exit
-4. The agent reads the output, routes each event by `source` field, re-invokes the listener
-5. With `wait=true`, the sidecar blocks forever — never returns `[]`
+### The Rule
+
+**Always drain with a background Bash task. Never use source-register.**
+
+### Correct Pattern
+
+```
+Bash(command='curl -sf "http://localhost:PORT/events?wait=true"', run_in_background=true)
+```
+
+The lifecycle:
+
+1. Read `.claude/sidecar.json` to get the current port
+2. Start drain as a **background** Bash task (`run_in_background: true`)
+3. Session is free to do other work while the drain blocks at the sidecar
+4. When events arrive, curl returns → task completes → `<task-notification>` delivered
+5. Process events (route by `source` field)
+6. Re-arm drain immediately with another background Bash task
+
+With `wait=true`, the sidecar blocks forever — it never returns `[]`. The curl
+only completes when there are actual events to deliver.
+
+### Port Discovery
+
+The sidecar port is dynamic. Always read it from `.claude/sidecar.json`:
+
+```bash
+PORT=$(python3 -c "import json; print(json.load(open('.claude/sidecar.json'))['port'])")
+```
+
+### Anti-Patterns (DO NOT DO THESE)
+
+**1. source-register command for drain — CIRCULAR NESTING**
+
+```
+# WRONG — creates infinite loop
+source-register.py command 'drain' curl /events?wait=true
+```
+
+Why this breaks: The drain output becomes a `command_completed` event in the
+sidecar. That event needs ANOTHER drain to pick it up, which creates another
+`command_completed` event, ad infinitum. The sidecar's `command` source type
+is for one-shot blocking commands that produce a single result — not for the
+drain itself.
+
+**2. Foreground drain — BLOCKS CONVERSATION**
+
+```
+# WRONG — blocks until events arrive, agent can't do anything
+Bash(command='curl -sf "http://localhost:PORT/events?wait=true"')
+```
+
+The entire point of `el` is to avoid blocking. A foreground drain defeats
+the purpose — the agent sits idle waiting for curl to return instead of
+doing useful work.
+
+**3. Non-blocking drain in a loop — BURNS TOKENS**
+
+```
+# WRONG — polling, the thing el was built to eliminate
+while true; do
+  curl -sf "http://localhost:PORT/events?wait=false"
+  sleep 5
+done
+```
+
+This is just polling with extra steps. Use `wait=true` with a background
+task instead.
+
+### Single Consumer Rule
+
+Use exactly ONE drain consumer per session. Multiple consumers compete for the
+`picked_up` flag on events, causing missed events. The correct architecture is
+one background drain task that feeds all event processing.
+
+### After Sidecar Restart
+
+When the sidecar restarts on a new port:
+
+1. Read the new port from `.claude/sidecar.json`
+2. Update any ngrok tunnels to point to the new port
+3. Start a new background drain with the new port
+4. Events from before restart are preserved in the DB (same file per project)
 
 ### Drain Script Example
 
