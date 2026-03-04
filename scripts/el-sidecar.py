@@ -141,13 +141,29 @@ def _register_watch_handler(plugin_name, add_func, remove_func):
 # Database
 # ---------------------------------------------------------------------------
 
-_db_lock = threading.Lock()
+# RLock: reentrant so on_pick callbacks can safely call insert_event()
+_db_lock = threading.RLock()
+
+# DDL runs once — skip on subsequent _get_db() calls to reduce _db_lock
+# hold time. Without this, every operation creates a connection and runs
+# 4x CREATE TABLE IF NOT EXISTS, inflating lock contention.
+_db_initialized = False
 
 
 def _get_db():
-    """Create a new connection for the calling thread."""
+    """Create a new DB connection for the calling thread.
+    DDL runs once globally, not on every call."""
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
+    global _db_initialized
+    if not _db_initialized:
+        _create_tables(conn)
+        _db_initialized = True
+    return conn
+
+
+def _create_tables(conn):
+    """Create core tables. Called once during first _get_db()."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,7 +213,6 @@ def _get_db():
         )
     """)
     conn.commit()
-    return conn
 
 
 def _init_db():
@@ -313,12 +328,10 @@ def _pick_events(source=None):
                 ).fetchall()
             if not rows:
                 return []
-
             events = []
             for row in rows:
                 (eid, src, ts, user_id, text, channel, etype,
                  thread_ts, bot_id, assoc_json, meta_json, received_at) = row
-
                 evt = {'source': src}
                 if ts:
                     evt['ts'] = ts
@@ -348,7 +361,6 @@ def _pick_events(source=None):
                     except (json.JSONDecodeError, ValueError):
                         pass
                 events.append(evt)
-
             # Mark picked up
             ids = [row[0] for row in rows]
             placeholders = ','.join('?' for _ in ids)
@@ -357,17 +369,18 @@ def _pick_events(source=None):
                 ids,
             )
             conn.commit()
-
-            # Notify plugins about picked events
-            for name, callback in _plugin_on_pick:
-                try:
-                    callback(events)
-                except Exception as e:
-                    sys.stderr.write(f"[sidecar] on_pick callback '{name}' error: {e}\n")
-
-            return events
         finally:
             conn.close()
+    # on_pick callbacks run OUTSIDE _db_lock — safe for callbacks that
+    # need DB access (e.g., insert_event). Previously ran inside the lock,
+    # which was a latent deadlock with non-reentrant Lock.
+    if events:
+        for name, callback in _plugin_on_pick:
+            try:
+                callback(events)
+            except Exception as e:
+                sys.stderr.write(f"[sidecar] on_pick callback '{name}' error: {e}\n")
+    return events
 
 
 def _pending_count(source=None):
@@ -584,21 +597,29 @@ def _list_watches(plugin=None):
 # Long-poll notification
 # ---------------------------------------------------------------------------
 
-_event_notify = threading.Event()
-_response_notify = threading.Event()
-_ledger_notify = threading.Event()
+# Condition variables for long-poll notification.
+# Using Condition (not Event) to prevent thundering herd: Event.set() wakes
+# ALL waiting threads, causing them all to contend for _db_lock. Condition
+# .notify_all() also wakes all, but the Condition's internal lock serializes
+# the wait/notify race that Event has (set between clear and wait = lost signal).
+_event_cond = threading.Condition()
+_response_cond = threading.Condition()
+_ledger_cond = threading.Condition()
 
 
 def _notify_event_waiters():
-    _event_notify.set()
+    with _event_cond:
+        _event_cond.notify_all()
 
 
 def _notify_response_waiters():
-    _response_notify.set()
+    with _response_cond:
+        _response_cond.notify_all()
 
 
 def _notify_ledger_waiters():
-    _ledger_notify.set()
+    with _ledger_cond:
+        _ledger_cond.notify_all()
 
 
 # ---------------------------------------------------------------------------
@@ -1540,10 +1561,9 @@ class SidecarHandler(BaseHTTPRequestHandler):
 
         if wait:
             # Block until events exist — no timeout, no empty returns
-            while _pending_count(source) == 0:
-                _event_notify.clear()
-                _event_notify.wait(timeout=5.0)
-
+            with _event_cond:
+                while _pending_count(source) == 0:
+                    _event_cond.wait(timeout=5.0)
             # Burst collection — wait 500ms for more events to batch
             time.sleep(0.5)
 
@@ -1562,17 +1582,16 @@ class SidecarHandler(BaseHTTPRequestHandler):
             return
 
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            _response_notify.clear()
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            _response_notify.wait(timeout=min(1.0, remaining))
-            responses = _pick_responses(source)
-            if responses:
-                self._send_json(responses)
-                return
-
+        with _response_cond:
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                _response_cond.wait(timeout=min(1.0, remaining))
+                responses = _pick_responses(source)
+                if responses:
+                    self._send_json(responses)
+                    return
         self._send_json([])
 
     # ---- Ledger routes ----
@@ -1617,17 +1636,16 @@ class SidecarHandler(BaseHTTPRequestHandler):
             return
 
         deadline = time.time() + 30.0
-        while time.time() < deadline:
-            _ledger_notify.clear()
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            _ledger_notify.wait(timeout=min(1.0, remaining))
-            entries = _query_ledger(since_id, agent_id, entry_type, tag, limit)
-            if entries:
-                self._send_json(entries)
-                return
-
+        with _ledger_cond:
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                _ledger_cond.wait(timeout=min(1.0, remaining))
+                entries = _query_ledger(since_id, agent_id, entry_type, tag, limit)
+                if entries:
+                    self._send_json(entries)
+                    return
         self._send_json([])
 
     # ---- Watch routes ----

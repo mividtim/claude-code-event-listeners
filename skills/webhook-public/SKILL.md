@@ -32,4 +32,20 @@ To stop:
 Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/source-remove.py' 'SOURCE_NAME'")
 ```
 
-**Requirements:** ngrok must be installed and authenticated.
+**Avoiding missed events between restarts:**
+
+One-shot webhooks have a gap between when they exit and when the next listener
+starts. For services that send events continuously (Slack, chat platforms, CI),
+messages arriving during this gap are lost. To prevent this:
+
+1. Start the new listener **first** (so the gap is as short as possible)
+2. **Then** catch up by polling the service's history API for events since your
+   last processed timestamp (high watermark)
+3. Process any missed events and update the watermark
+4. The listener is already running for the next event
+
+This "start listener, then catch up" pattern ensures no events are dropped.
+Store the watermark in a persistent file (e.g., `/tmp/webhook-watermark`) so
+it survives across restarts and context compactions.
+
+**Requirements:** ngrok must be installed and authenticated (`ngrok config add-authtoken <token>`).
