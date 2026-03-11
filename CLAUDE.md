@@ -13,6 +13,7 @@ nothing while waiting. Events arrive through the drain loop, and you react.
 
 | Command | Use when |
 |---------|----------|
+| `/el:drain` | Starting the event drain loop (do this first!) |
 | `/el:ci-watch <run-id \| branch>` | Waiting for a GitHub Actions run to finish |
 | `/el:pr-checks <pr-number>` | Waiting for all PR checks to resolve |
 | `/el:log-tail <file> [timeout] [max_lines]` | Tailing a log file for new output |
