@@ -12,17 +12,17 @@ Manage the el-sidecar event hub. Parse `$ARGUMENTS` to determine the subcommand.
 
 Start the sidecar in the background. Optional port argument overrides auto-assign.
 
-```
-Bash(command="python3 '${CLAUDE_PLUGIN_ROOT}/scripts/el-sidecar.py' ${PORT_ARG} --project-root '${PROJECT_ROOT}' 2>&1 &
-PID=$!
-sleep 1
-if kill -0 $PID 2>/dev/null; then
-  echo 'Sidecar started (PID: '$PID')'
-  cat '${PROJECT_ROOT}/.claude/sidecar.json' 2>/dev/null || echo 'Waiting for metadata...'
-else
-  echo 'Sidecar failed to start'
-fi", run_in_background=true)
-```
+Run this command **in the background** (set `run_in_background` to true):
+
+    python3 '${CLAUDE_PLUGIN_ROOT}/scripts/el-sidecar.py' ${PORT_ARG} --project-root '${PROJECT_ROOT}' 2>&1 &
+    PID=$!
+    sleep 1
+    if kill -0 $PID 2>/dev/null; then
+      echo 'Sidecar started (PID: '$PID')'
+      cat '${PROJECT_ROOT}/.claude/sidecar.json' 2>/dev/null || echo 'Waiting for metadata...'
+    else
+      echo 'Sidecar failed to start'
+    fi
 
 Where:
 - `${PORT_ARG}` is the port from `$ARGUMENTS` (if given), or omitted for auto-assign

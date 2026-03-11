@@ -1,3 +1,8 @@
+## 1.1.2
+
+### Fixed
+- **Drain skill no longer triggers parameter type coercion errors.** Two changes: (1) replaced the pseudo-code `Bash(command="...", run_in_background=true, timeout=600000)` invocation syntax with natural-language instructions that the model constructs tool calls from rather than copying verbatim, and (2) dropped the `timeout` parameter entirely — curl's `--max-time 540` already guarantees the process exits, making the Bash-level timeout redundant. This eliminates both failure points (boolean and number type coercion) without introducing polling.
+
 ## 1.1.1
 
 ### Fixed

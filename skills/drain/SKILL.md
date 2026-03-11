@@ -4,11 +4,11 @@ argument-hint:
 allowed-tools: Bash, Read
 ---
 
-Start the sidecar event drain as a background Bash task:
+Run the drain script **in the background** using Bash. The command is:
 
-```
-Bash(command="${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh drain", run_in_background=true, timeout=600000)
-```
+    ${CLAUDE_PLUGIN_ROOT}/scripts/event-listen.sh drain
+
+Set `run_in_background` to true so the agent gets a task-notification when events arrive. Do NOT set a timeout — the script handles its own timeouts internally.
 
 When a `<task-notification>` arrives:
 1. Read the task output

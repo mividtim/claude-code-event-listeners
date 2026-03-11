@@ -117,31 +117,31 @@ system.
 
 ### Correct Pattern
 
-```
-Bash(command='curl -sf "http://localhost:PORT/events?wait=true&timeout=480" --max-time 540', run_in_background=true, timeout=600000)
-```
+Use `/el:drain` or run the drain script as a **background** Bash task (set
+`run_in_background` to true). Do not set `timeout` — the script handles its
+own timeouts internally via curl `--max-time` and server-side `?timeout=`.
 
 The lifecycle:
 
 1. Read `.claude/sidecar.json` to get the current port
-2. Start drain as a **background** Bash task (`run_in_background: true`, `timeout: 600000`)
+2. Start drain as a **background** Bash task (`run_in_background` = true)
 3. Session is free to do other work while the drain blocks at the sidecar
-4. When events arrive, curl returns → task completes → `<task-notification>` delivered
+4. When events arrive, curl returns -> task completes -> `<task-notification>` delivered
 5. Process events (route by `source` field)
 6. Re-arm drain immediately — including after empty `[]` timeout returns
 
-### Three-Layer Timeout
+### Two-Layer Timeout
 
 | Layer | Value | Purpose |
 |-------|-------|---------|
 | Server `?timeout=480` | 480s (8 min) | Handler exits cleanly, returns `[]` |
 | curl `--max-time 540` | 540s (9 min) | Safety net if server hangs |
-| CC `timeout=600000` | 600s (10 min) | Background task ceiling |
 
-Each layer is a backstop for the one above. The server always closes the
-connection before curl disconnects, preventing ghost handler threads from
-consuming events. This is how `wait=true` achieves instant responsiveness
-with zero wasted turns — at most one empty `[]` return every 8 minutes.
+The server always closes the connection before curl disconnects, preventing
+ghost handler threads from consuming events. This is how `wait=true` achieves
+instant responsiveness with zero wasted turns — at most one empty `[]` return
+every 8 minutes. No Bash-level `timeout` parameter is needed because curl's
+`--max-time` guarantees the process exits within 9 minutes.
 
 ### Port Discovery
 
