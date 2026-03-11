@@ -1,6 +1,6 @@
 """el-sidecar — Plugin-aware event hub for Claude Code agents.
 
-Version: 1.1.0
+Version: 1.1.2
 
 Source-agnostic event hub with self-registering plugin system. Plugins declare
 themselves via sidecar/plugin.py with a register(api) function. The sidecar
@@ -30,7 +30,7 @@ Env vars:
     SIDECAR_PROJECT_ROOT   — Project root for metadata (default: cwd)
 """
 
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 
 import hashlib
 import heapq
