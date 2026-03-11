@@ -1,3 +1,11 @@
+## 1.1.1
+
+### Fixed
+- **`/el:drain` type coercion bug** — Claude Opus 4.6 intermittently serializes `run_in_background` and `timeout` as strings instead of boolean/number, causing `InputValidationError`. The drain skill now has explicit type warnings and a `--bg` fallback mode that handles backgrounding internally via `nohup`, requiring no special Bash tool parameters. Fixes #1.
+
+### Added
+- **`drain.sh --bg` mode** — Self-backgrounding drain that forks the long-poll curl, writes events to `/tmp/el-drain-{hash}.out`, and returns immediately. No `run_in_background` or `timeout` parameters needed. Kills any previous drain automatically on re-arm.
+
 ## 1.1.0
 
 ### Added

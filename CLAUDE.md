@@ -121,6 +121,18 @@ system.
 Bash(command='curl -sf "http://localhost:PORT/events?wait=true&timeout=480" --max-time 540', run_in_background=true, timeout=600000)
 ```
 
+**Type coercion warning:** Some models intermittently serialize `run_in_background`
+as the string `"true"` instead of boolean `true`, and `timeout` as `"600000"` instead
+of number `600000`. Claude Code rejects these with `InputValidationError`. If this
+happens, use the `--bg` fallback:
+
+```bash
+event-listen.sh drain --bg   # Backgrounds via nohup, returns immediately
+cat /tmp/el-drain-HASH.out   # Check for events later
+```
+
+The `/el:drain` skill handles this automatically — see its SKILL.md for details.
+
 The lifecycle:
 
 1. Read `.claude/sidecar.json` to get the current port
