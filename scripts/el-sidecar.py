@@ -30,7 +30,7 @@ Env vars:
     SIDECAR_PROJECT_ROOT   — Project root for metadata (default: cwd)
 """
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 import hashlib
 import heapq
